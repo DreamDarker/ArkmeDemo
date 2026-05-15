@@ -12,25 +12,28 @@ Treat that file as the project-local answer standard. Do not skip it, even for s
 
 At the beginning of every new user prompt, before answering the new request or making new changes, the AI assistant must check whether the previous iteration has already been recorded in both:
 
-- `docs/codex-iteration-log.md`
+- the current candidate's personal Markdown log under `docs/codex-logs/`
 - `src/data/aiConversationLog.ts`
 
 If the previous iteration is missing from either file, write that missing record first. Only after the previous input/output is recorded may the assistant continue analyzing or answering the new prompt.
+
+The AI assistant must also check whether `.codex/candidate-session.json` exists and points to the current candidate's personal Markdown log. If the session file or personal log is missing, stop and ask the candidate to explicitly provide their real name, then run `pnpm codex:init-log -- --name="<候选人姓名>"` before continuing. Do not write real candidate iterations directly into `docs/codex-iteration-log.md`; that file is only the shared template. The candidate name must come from the candidate's explicit input and cannot be inferred from GitHub, Git config, OS username, email, directory name, or any other machine metadata.
 
 ## Codex Iteration Log Rule
 
 This project is used as a Codex-assisted coding exercise. When working in this repository, every Codex iteration that changes or analyzes the project must append one record to:
 
-`docs/codex-iteration-log.md`
+the current candidate's personal Markdown log under `docs/codex-logs/`
 
 The same iteration must also be added to the UI data source:
 
 `src/data/aiConversationLog.ts`
 
-This keeps the in-app sidebar conversation "和AI编程工具对话" synchronized with the Markdown log.
+This keeps the in-app sidebar conversation "和AI编程工具对话" synchronized with the current candidate's personal Markdown log.
 
 Each record must include:
 
+- The candidate name from the `候选人名称` value at the top of the current candidate's personal Markdown log. This value must be explicitly provided by the candidate and cannot be inferred from GitHub, Git config, OS username, email, or directory names.
 - The current local time.
 - The candidate's exact prompt or a faithful summary when the prompt is long.
 - The AI assistant's final answer for that iteration.
@@ -55,7 +58,7 @@ Use this format:
 - ...
 ```
 
-In `src/data/aiConversationLog.ts`, append the matching entry to `aiConversationLogEntries` with the same timestamp, user input, AI final output, changed files, and verification result.
+In `src/data/aiConversationLog.ts`, append the matching entry to `aiConversationLogEntries` with the same timestamp, user input, AI final output, changed files, and verification result. The seed repository keeps this file empty; each candidate's clone should fill it with that candidate's own process only.
 
 Before finishing a task, run the full answer verification:
 
@@ -74,3 +77,18 @@ If this is the first setup run and no candidate iteration exists yet, use:
 ```sh
 node scripts/verify-codex-log.mjs --allow-empty
 ```
+
+## Final Test Link Rule
+
+The project has only two local testing surfaces:
+
+- Mobile Demo: `http://127.0.0.1:5173/`
+- Message test console: `http://127.0.0.1:5173/sendtest`
+
+When the final answer describes completed work, include the relevant test link:
+
+- If the iteration changed the Mobile Demo, include `http://127.0.0.1:5173/`.
+- If the iteration changed the message test console, include `http://127.0.0.1:5173/sendtest`.
+- If both surfaces changed, include both links.
+
+After the candidate first asks Codex to read `AGENTS.md` and `docs/candidate-rules.md`, the assistant should make these two available testing links clear when useful, especially after starting or confirming the local dev server.

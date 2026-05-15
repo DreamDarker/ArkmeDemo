@@ -15,29 +15,47 @@ AI 助手在执行任何需求前，必须先理解：
 - 项目是移动端优先的即我 Demo。
 - 当前项目只保留首页、侧边栏、快记、洞见占位、我的等基础结构。
 - “安排”模块是候选人后续需要根据题目新增的能力，初始项目不应预置安排模块实现。
-- 每次迭代都必须更新 `docs/codex-iteration-log.md`。
+- 每次迭代都必须更新当前候选人在 `docs/codex-logs/` 下的个人 Markdown 日志。
 - 每次迭代也必须同步更新 `src/data/aiConversationLog.ts`，让应用内“和AI编程工具对话”能展示本轮输入输出。
 
 ## 新一轮对话前置检查
 
 候选人每次在 AI 编程工具中输入新的需求后，AI 助手在回答或修改代码前，必须先检查上一轮输入输出是否已经写入：
 
-- `docs/codex-iteration-log.md`
+- `.codex/candidate-session.json` 指向的当前候选人个人 Markdown 日志
 - `src/data/aiConversationLog.ts`
 
 如果上一轮记录缺失，必须先补齐上一轮记录，再继续处理新的需求。
+
+同时，AI 助手必须检查 `.codex/candidate-session.json` 是否存在，并确认其中的 `markdownLogPath` 指向当前候选人的个人日志。如果本机会话文件或个人日志缺失，必须先引导候选人明确输入自己的真实姓名；拿到姓名后先创建 `docs/codex-logs/candidate-<候选人明确输入的姓名>-<本机用户名>-<时间戳>-<短哈希>.md`，再继续写入本轮迭代记录或进行后续分析。`候选人名称` 只能来自候选人明确输入，不能从 GitHub、Git 配置、本机用户名、邮箱、目录名或其他机器元数据推断。`docs/codex-iteration-log.md` 只作为共享模板，不写入真实迭代记录。
 
 ## 每轮迭代要求
 
 每轮 Codex 迭代应尽量遵循以下步骤：
 
 1. 先检查上一轮输入输出是否已经写入 Markdown 日志和 UI 数据源。
-2. 再复述本轮需求和影响范围。
-3. 阅读相关代码后再修改。
-4. 修改范围保持聚焦，不做无关重构。
-5. 完成后运行必要验证，至少包括 `pnpm lint` 和 `pnpm build`。
-6. 将本轮时间、用户输入、AI 最终输出、改动文件、验证结果追加到 `docs/codex-iteration-log.md`。
-7. 将同一轮记录追加到 `src/data/aiConversationLog.ts` 的 `aiConversationLogEntries`，保持界面展示与 Markdown 日志一致。
+2. 检查 `.codex/candidate-session.json` 是否已指向当前候选人的个人日志；未初始化时先引导候选人明确输入真实姓名并创建个人日志。
+3. 再复述本轮需求和影响范围。
+4. 阅读相关代码后再修改。
+5. 修改范围保持聚焦，不做无关重构。
+6. 完成后运行必要验证，至少包括 `pnpm lint` 和 `pnpm build`。
+7. 将本轮时间、用户输入、AI 最终输出、改动文件、验证结果追加到当前候选人的个人 Markdown 日志。
+8. 将同一轮记录追加到 `src/data/aiConversationLog.ts` 的 `aiConversationLogEntries`，保持界面展示与 Markdown 日志一致。
+
+## 最终输出测试链接
+
+本项目只保留两个本地测试入口：
+
+- 移动端 Demo：`http://127.0.0.1:5173/`
+- 消息测试后台：`http://127.0.0.1:5173/sendtest`
+
+AI 助手完成一轮改动后的最终回复必须按影响范围给出测试链接：
+
+- 如果本轮改动影响移动端 Demo，最终回复必须包含 `http://127.0.0.1:5173/`。
+- 如果本轮改动影响消息测试后台，最终回复必须包含 `http://127.0.0.1:5173/sendtest`。
+- 如果两端都受影响，最终回复必须同时包含两个链接。
+
+候选人一开始要求 Codex 阅读 `AGENTS.md` 和 `docs/candidate-rules.md` 后，AI 助手应在后续需要测试时明确这些入口，避免候选人不知道该打开哪个页面。
 
 ## 最终提交要求
 

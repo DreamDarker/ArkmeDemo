@@ -1,21 +1,28 @@
 import React from "react";
 import {
+  createTestGroup,
+  createTestGroupMessage,
   createTestIdentity,
   createTestMessage,
+  getInitialTestGroups,
   getInitialTestIdentities,
   getInitialTestMessages,
+  getPrivateConversationId,
+  persistTestGroups,
   persistTestIdentities,
   persistTestMessages,
   testConversationStorageEvent,
+  testGroupsStorageKey,
   testIdentitiesStorageKey,
   testMessagesStorageKey,
+  type TestConversationType,
   type TestIdentity,
   type TestMessage,
 } from "@/data/testConversations";
 import { formatBubbleTime, formatTimeLabel } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
-function getLatestMessage(messages: TestMessage[], identityId: string) {
+function getLatestIdentityMessage(messages: TestMessage[], identityId: string) {
   return messages
     .filter((message) => message.identityId === identityId)
     .reduce<TestMessage | null>((latest, message) => {
@@ -24,17 +31,34 @@ function getLatestMessage(messages: TestMessage[], identityId: string) {
     }, null);
 }
 
+function getLatestConversationMessage(messages: TestMessage[], conversationId: string) {
+  return messages
+    .filter((message) => message.conversationId === conversationId)
+    .reduce<TestMessage | null>((latest, message) => {
+      if (!latest || message.sentAt > latest.sentAt) return message;
+      return latest;
+    }, null);
+}
+
 export default function AdminMessageConsole() {
   const [identities, setIdentities] = React.useState(getInitialTestIdentities);
+  const [groups, setGroups] = React.useState(getInitialTestGroups);
   const [messages, setMessages] = React.useState(getInitialTestMessages);
   const [activeIdentityId, setActiveIdentityId] = React.useState(
     () => getInitialTestIdentities()[0]?.id ?? ""
   );
+  const [activeGroupId, setActiveGroupId] = React.useState(
+    () => getInitialTestGroups()[0]?.id ?? ""
+  );
+  const [messageMode, setMessageMode] = React.useState<TestConversationType>("private");
   const [showCreateIdentityModal, setShowCreateIdentityModal] = React.useState(false);
+  const [showCreateGroupModal, setShowCreateGroupModal] = React.useState(false);
   const [showIdentityPicker, setShowIdentityPicker] = React.useState(false);
   const [showAdminInfo, setShowAdminInfo] = React.useState(false);
   const [identityName, setIdentityName] = React.useState("");
   const [identityNote, setIdentityNote] = React.useState("");
+  const [groupName, setGroupName] = React.useState("");
+  const [groupNote, setGroupNote] = React.useState("");
   const [messageText, setMessageText] = React.useState("");
   const [messageTextFocused, setMessageTextFocused] = React.useState(false);
   const messagesEndRef = React.useRef<HTMLDivElement>(null);
@@ -43,25 +67,46 @@ export default function AdminMessageConsole() {
 
   const activeIdentity =
     identities.find((identity) => identity.id === activeIdentityId) ?? identities[0] ?? null;
+  const activeGroup =
+    groups.find((group) => group.id === activeGroupId) ?? groups[0] ?? null;
+  const activeConversationId =
+    messageMode === "group"
+      ? activeGroup?.id ?? ""
+      : activeIdentity
+        ? getPrivateConversationId(activeIdentity.id)
+        : "";
   const activeMessages = React.useMemo(
     () =>
-      activeIdentity
+      activeConversationId
         ? messages
-            .filter((message) => message.identityId === activeIdentity.id)
+            .filter((message) => message.conversationId === activeConversationId)
             .sort((a, b) => a.sentAt - b.sentAt)
         : [],
-    [activeIdentity, messages]
+    [activeConversationId, messages]
   );
   const activeMessageKey = activeMessages.at(-1)?.id ?? "empty";
-  const canSendMessage = Boolean(activeIdentity && messageText.trim());
+  const canSendMessage = Boolean(
+    activeIdentity &&
+      messageText.trim() &&
+      (messageMode === "private" || activeGroup)
+  );
   const sortedIdentities = React.useMemo(
     () =>
       [...identities].sort((a, b) => {
-        const latestA = getLatestMessage(messages, a.id)?.sentAt ?? a.createdAt;
-        const latestB = getLatestMessage(messages, b.id)?.sentAt ?? b.createdAt;
+        const latestA = getLatestIdentityMessage(messages, a.id)?.sentAt ?? a.createdAt;
+        const latestB = getLatestIdentityMessage(messages, b.id)?.sentAt ?? b.createdAt;
         return latestB - latestA;
       }),
     [identities, messages]
+  );
+  const sortedGroups = React.useMemo(
+    () =>
+      [...groups].sort((a, b) => {
+        const latestA = getLatestConversationMessage(messages, a.id)?.sentAt ?? a.createdAt;
+        const latestB = getLatestConversationMessage(messages, b.id)?.sentAt ?? b.createdAt;
+        return latestB - latestA;
+      }),
+    [groups, messages]
   );
 
   React.useEffect(() => {
@@ -70,11 +115,18 @@ export default function AdminMessageConsole() {
   }, [activeIdentityId, identities]);
 
   React.useEffect(() => {
+    if (activeGroupId || groups.length === 0) return;
+    setActiveGroupId(groups[0].id);
+  }, [activeGroupId, groups]);
+
+  React.useEffect(() => {
     if (typeof window === "undefined") return;
 
     const refreshTestConversations = () => {
       const nextIdentities = getInitialTestIdentities();
+      const nextGroups = getInitialTestGroups();
       setIdentities(nextIdentities);
+      setGroups(nextGroups);
       setMessages(getInitialTestMessages());
       setActiveIdentityId((currentIdentityId) => {
         if (
@@ -85,11 +137,21 @@ export default function AdminMessageConsole() {
         }
         return nextIdentities[0]?.id ?? "";
       });
+      setActiveGroupId((currentGroupId) => {
+        if (
+          currentGroupId &&
+          nextGroups.some((group) => group.id === currentGroupId)
+        ) {
+          return currentGroupId;
+        }
+        return nextGroups[0]?.id ?? "";
+      });
     };
 
     const handleStorage = (event: StorageEvent) => {
       if (
         event.key !== testIdentitiesStorageKey &&
+        event.key !== testGroupsStorageKey &&
         event.key !== testMessagesStorageKey
       ) {
         return;
@@ -171,13 +233,48 @@ export default function AdminMessageConsole() {
     setIdentityNote("");
   };
 
+  const handleCreateGroup = () => {
+    const normalizedName = groupName.trim();
+    if (!normalizedName) return;
+
+    setGroups((prev) => {
+      const nextGroups = [
+        ...prev,
+        createTestGroup(
+          normalizedName,
+          groupNote,
+          identities.map((identity) => identity.id),
+          prev.length
+        ),
+      ];
+      persistTestGroups(nextGroups);
+      setActiveGroupId(nextGroups.at(-1)?.id ?? "");
+      setMessageMode("group");
+      return nextGroups;
+    });
+    setShowCreateGroupModal(false);
+    setGroupName("");
+    setGroupNote("");
+  };
+
+  const closeCreateGroupModal = () => {
+    setShowCreateGroupModal(false);
+    setGroupName("");
+    setGroupNote("");
+  };
+
   const handleSendMessage = () => {
     if (!activeIdentity || !messageText.trim()) return;
+    if (messageMode === "group" && !activeGroup) return;
 
     setMessages((prev) => {
+      const nextMessage =
+        messageMode === "group" && activeGroup
+          ? createTestGroupMessage(activeGroup.id, activeIdentity.id, messageText)
+          : createTestMessage(activeIdentity.id, messageText);
       const nextMessages = [
         ...prev,
-        createTestMessage(activeIdentity.id, messageText),
+        nextMessage,
       ];
       persistTestMessages(nextMessages);
       return nextMessages;
@@ -232,11 +329,55 @@ export default function AdminMessageConsole() {
             </a>
           </div>
 
+          <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[var(--admin-border-subtle)] px-5 py-3">
+            <div className="inline-flex rounded-[10px] bg-[var(--admin-panel-muted-bg)] p-1">
+              {(["private", "group"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  className={cn(
+                    "h-8 rounded-[8px] px-3 text-[13px] transition focus:outline-none focus-visible:[box-shadow:var(--admin-input-focus-shadow)]",
+                    messageMode === mode
+                      ? "bg-[var(--admin-dialog-bg)] text-text [box-shadow:var(--shadow-sm)]"
+                      : "text-text-tertiary hover:text-text"
+                  )}
+                  onClick={() => setMessageMode(mode)}
+                >
+                  {mode === "private" ? "私聊" : "群聊"}
+                </button>
+              ))}
+            </div>
+            {messageMode === "group" && (
+              <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
+                <select
+                  value={activeGroup?.id ?? ""}
+                  onChange={(event) => setActiveGroupId(event.target.value)}
+                  className="h-9 min-w-0 max-w-[220px] rounded-[9px] border border-[var(--admin-border)] bg-[var(--admin-input-bg)] px-2 text-[13px] text-text outline-none focus:border-primary focus:[box-shadow:var(--admin-input-focus-shadow)]"
+                >
+                  {sortedGroups.map((group) => (
+                    <option key={group.id} value={group.id}>
+                      {group.name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="h-9 shrink-0 rounded-[9px] border border-[var(--admin-border)] px-3 text-[13px] text-text-tertiary transition hover:bg-hover-overlay hover:text-text focus:outline-none focus-visible:[box-shadow:var(--admin-input-focus-shadow)]"
+                  onClick={() => setShowCreateGroupModal(true)}
+                >
+                  新建群
+                </button>
+              </div>
+            )}
+          </div>
+
           <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-5 pt-4">
             <div className="mx-auto flex min-h-full w-full flex-col">
               {activeMessages.length > 0 ? (
                 <AdminConversationMessages
                   identity={activeIdentity}
+                  identities={identities}
+                  mode={messageMode}
                   messages={activeMessages}
                 />
               ) : (
@@ -249,7 +390,9 @@ export default function AdminMessageConsole() {
                       暂无发送记录
                     </p>
                     <p className="mt-1 text-[12px] leading-5 text-text-tertiary">
-                      选择或创建身份后，从下方输入框发送第一条私聊测试消息。
+                      {messageMode === "group"
+                        ? "选择群和发送身份后，从下方输入框发送第一条群聊测试消息。"
+                        : "选择或创建身份后，从下方输入框发送第一条私聊测试消息。"}
                     </p>
                   </div>
                 </div>
@@ -404,15 +547,85 @@ export default function AdminMessageConsole() {
           </form>
         </div>
       )}
+      {showCreateGroupModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
+          <button
+            type="button"
+            className="absolute inset-0 bg-[var(--admin-overlay)] backdrop-blur-[2px]"
+            onClick={closeCreateGroupModal}
+            aria-label="关闭新增群弹窗"
+          />
+          <form
+            className="relative z-10 w-full max-w-[420px] rounded-[14px] border border-[var(--admin-border)] bg-[var(--admin-dialog-bg)] p-5 text-text [box-shadow:var(--admin-floating-shadow)]"
+            onSubmit={(event) => {
+              event.preventDefault();
+              handleCreateGroup();
+            }}
+          >
+            <div className="flex items-center justify-between">
+              <h2 className="text-base font-semibold">新增测试群</h2>
+              <button
+                type="button"
+                className="rounded-[8px] px-2 py-1 text-sm text-text-tertiary transition hover:bg-hover-overlay focus:outline-none focus-visible:[box-shadow:var(--admin-input-focus-shadow)]"
+                onClick={closeCreateGroupModal}
+              >
+                关闭
+              </button>
+            </div>
+            <label className="mt-4 block text-xs font-medium text-text-tertiary">
+              群名称
+              <input
+                value={groupName}
+                onChange={(event) => setGroupName(event.target.value)}
+                placeholder="例如：产品讨论群"
+                autoFocus
+                className="mt-1 h-10 w-full rounded-[10px] border border-[var(--admin-border)] bg-[var(--admin-input-bg)] px-3 text-sm text-text outline-none transition placeholder:text-input-placeholder focus:border-primary focus:[box-shadow:var(--admin-input-focus-shadow)]"
+              />
+            </label>
+            <label className="mt-3 block text-xs font-medium text-text-tertiary">
+              备注
+              <input
+                value={groupNote}
+                onChange={(event) => setGroupNote(event.target.value)}
+                placeholder="例如：模拟多人需求讨论"
+                className="mt-1 h-10 w-full rounded-[10px] border border-[var(--admin-border)] bg-[var(--admin-input-bg)] px-3 text-sm text-text outline-none transition placeholder:text-input-placeholder focus:border-primary focus:[box-shadow:var(--admin-input-focus-shadow)]"
+              />
+            </label>
+            <p className="mt-3 text-xs leading-5 text-text-tertiary">
+              新群会默认包含当前所有测试身份，后续可用不同身份向群里发消息。
+            </p>
+            <div className="mt-5 flex justify-end gap-3">
+              <button
+                type="button"
+                className="h-10 rounded-[10px] border border-[var(--admin-border)] px-4 text-sm font-medium text-text transition hover:bg-hover-overlay focus:outline-none focus-visible:[box-shadow:var(--admin-input-focus-shadow)]"
+                onClick={closeCreateGroupModal}
+              >
+                取消
+              </button>
+              <button
+                type="submit"
+                className="h-10 rounded-[10px] bg-primary px-4 text-sm font-semibold text-on-primary transition hover:bg-primary-hover active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 focus:outline-none focus-visible:[box-shadow:var(--admin-input-focus-shadow)]"
+                disabled={!groupName.trim()}
+              >
+                创建群
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 }
 
 function AdminConversationMessages({
   identity,
+  identities,
+  mode,
   messages,
 }: {
   identity: TestIdentity | null;
+  identities: TestIdentity[];
+  mode: TestConversationType;
   messages: TestMessage[];
 }) {
   let previousSentAt = 0;
@@ -440,8 +653,24 @@ function AdminConversationMessages({
               </div>
             ) : (
               <div className="flex items-start justify-end gap-3">
-                <MessageBubble align="right" text={message.text} />
-                {identity && <IdentityAvatar identity={identity} large />}
+                <div className="flex max-w-[76%] flex-col items-end gap-1">
+                  {mode === "group" && (
+                    <span className="pr-1 text-[11px] leading-4 text-text-tertiary">
+                      {identities.find((item) => item.id === message.identityId)?.name ??
+                        "群成员"}
+                    </span>
+                  )}
+                  <MessageBubble align="right" text={message.text} />
+                </div>
+                {(identities.find((item) => item.id === message.identityId) ?? identity) && (
+                  <IdentityAvatar
+                    identity={
+                      identities.find((item) => item.id === message.identityId) ??
+                      identity!
+                    }
+                    large
+                  />
+                )}
               </div>
             )}
           </div>

@@ -10,15 +10,21 @@ import { aiConversationLogEntries } from "@/data/aiConversationLog";
 import { useCandidateProfile } from "@/data/candidateProfile";
 import {
   createTestReplyMessage,
+  demoSenderIdentityId,
+  getInitialTestGroups,
   getInitialTestIdentities,
   getInitialTestMessages,
   getInitialTestReadState,
+  getPrivateConversationId,
   persistTestMessages,
   persistTestReadState,
   testConversationStorageEvent,
+  testGroupsStorageKey,
   testIdentitiesStorageKey,
   testMessagesStorageKey,
   testReadStateStorageKey,
+  type TestConversationType,
+  type TestGroup,
   type TestIdentity,
   type TestMessage,
   type TestReadState,
@@ -73,7 +79,15 @@ type ConversationReturnContext =
     };
 
 type TestConversationSummary = {
-  identity: TestIdentity;
+  conversationId: string;
+  conversationType: TestConversationType;
+  title: string;
+  subtitle: string;
+  avatarLabel: string;
+  color: string;
+  identity?: TestIdentity;
+  group?: TestGroup;
+  memberIdentities: TestIdentity[];
   records: TestConversationRecord[];
   latestMessage: TestMessage;
   latestUnreadIdentityMessage: TestMessage | null;
@@ -82,10 +96,11 @@ type TestConversationSummary = {
 
 type TestConversationRecord = RecordItem & {
   sender: TestMessageSender;
+  identityId: string;
 };
 
 type HomeMessagePreview = {
-  identity: TestIdentity;
+  summary: TestConversationSummary;
   message: TestMessage;
   unreadCount: number;
 };
@@ -342,6 +357,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     getInitialCreatedSelfRecords
   );
   const [testIdentities, setTestIdentities] = React.useState(getInitialTestIdentities);
+  const [testGroups, setTestGroups] = React.useState(getInitialTestGroups);
   const [testMessages, setTestMessages] = React.useState(getInitialTestMessages);
   const [testReadState, setTestReadState] =
     React.useState<TestReadState>(getInitialTestReadState);
@@ -358,6 +374,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
 
     const refreshTestConversations = () => {
       setTestIdentities(getInitialTestIdentities());
+      setTestGroups(getInitialTestGroups());
       setTestMessages(getInitialTestMessages());
       setTestReadState(getInitialTestReadState());
     };
@@ -365,6 +382,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     const handleStorage = (event: StorageEvent) => {
       if (
         event.key !== testIdentitiesStorageKey &&
+        event.key !== testGroupsStorageKey &&
         event.key !== testMessagesStorageKey &&
         event.key !== testReadStateStorageKey
       ) {
@@ -403,12 +421,17 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
   );
 
   const makeTestSource = React.useCallback(
-    (identity: TestIdentity, recordUid?: string): RecordSourceConversation => ({
+    (
+      label: string,
+      iconLabel: string,
+      conversationId: string,
+      recordUid?: string
+    ): RecordSourceConversation => ({
       type: "test",
-      label: identity.name,
+      label,
       actionLabel: t("records.openSource"),
-      iconLabel: identity.avatarLabel,
-      identityId: identity.id,
+      iconLabel,
+      conversationId,
       recordUid,
     }),
     [t]
@@ -501,10 +524,19 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     () =>
       testMessages
         .map<TestConversationRecord | null>((message) => {
-          const identity = testIdentities.find(
-            (item) => item.id === message.identityId
-          );
-          if (!identity) return null;
+          const identity = testIdentities.find((item) => item.id === message.identityId);
+          const group = testGroups.find((item) => item.id === message.conversationId);
+          const isGroup = message.conversationType === "group";
+          const privateIdentity =
+            !isGroup
+              ? testIdentities.find(
+                  (item) => getPrivateConversationId(item.id) === message.conversationId
+                )
+              : null;
+          const sourceLabel = isGroup ? group?.name : privateIdentity?.name;
+          const iconLabel = isGroup ? group?.avatarLabel : privateIdentity?.avatarLabel;
+          if (!sourceLabel || !iconLabel) return null;
+          if (message.sender === "identity" && !identity) return null;
 
           const uid = `test-${message.id}`;
           return {
@@ -513,12 +545,18 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
             send_at: message.sentAt,
             create_at: message.sentAt,
             update_at: message.sentAt,
-            sourceConversation: makeTestSource(identity, uid),
+            sourceConversation: makeTestSource(
+              sourceLabel,
+              iconLabel,
+              message.conversationId,
+              uid
+            ),
             sender: message.sender,
+            identityId: message.identityId,
           };
         })
         .filter((record): record is TestConversationRecord => Boolean(record)),
-    [makeTestSource, testIdentities, testMessages]
+    [makeTestSource, testGroups, testIdentities, testMessages]
   );
 
   const testDemoReplyRecords = React.useMemo<RecordItem[]>(
@@ -527,19 +565,20 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
   );
 
   const testConversationSummaries = React.useMemo<TestConversationSummary[]>(
-    () =>
-      testIdentities
-        .map((identity) => {
+    () => {
+      const privateSummaries = testIdentities
+        .map<TestConversationSummary | null>((identity) => {
+          const conversationId = getPrivateConversationId(identity.id);
           const records = testConversationRecords.filter(
-            (record) => record.sourceConversation?.identityId === identity.id
+            (record) => record.sourceConversation?.conversationId === conversationId
           );
           const messages = testMessages.filter(
-            (message) => message.identityId === identity.id
+            (message) => message.conversationId === conversationId
           );
           const unreadIdentityMessages = messages.filter(
             (message) =>
               message.sender === "identity" &&
-              message.sentAt > (testReadState[identity.id] ?? 0)
+              message.sentAt > (testReadState[conversationId] ?? 0)
           );
           const latestMessage = messages.reduce<TestMessage | null>(
             (latest, message) => {
@@ -560,18 +599,98 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           if (!latestMessage) return null;
 
           return {
+            conversationId,
+            conversationType: "private",
+            title: identity.name,
+            subtitle: identity.note || "测试私聊",
+            avatarLabel: identity.avatarLabel,
+            color: identity.color,
             identity,
+            memberIdentities: [identity],
             records,
             latestMessage,
             latestUnreadIdentityMessage,
             unreadCount: unreadIdentityMessages.length,
           };
-        })
-        .filter(
-          (summary): summary is TestConversationSummary => Boolean(summary)
-        )
-        .sort((a, b) => b.latestMessage.sentAt - a.latestMessage.sentAt),
-    [testConversationRecords, testIdentities, testMessages, testReadState]
+        });
+      const groupSummaries = testGroups
+        .map<TestConversationSummary | null>((group) => {
+          const memberIdentities = group.memberIdentityIds
+            .map((identityId) => testIdentities.find((identity) => identity.id === identityId))
+            .filter((identity): identity is TestIdentity => Boolean(identity));
+          const records = testConversationRecords.filter(
+            (record) => record.sourceConversation?.conversationId === group.id
+          );
+          const messages = testMessages.filter(
+            (message) => message.conversationId === group.id
+          );
+          const unreadIdentityMessages = messages.filter(
+            (message) =>
+              message.sender === "identity" &&
+              message.sentAt > (testReadState[group.id] ?? 0)
+          );
+          const latestMessage = messages.reduce<TestMessage | null>(
+            (latest, message) => {
+              if (!latest || message.sentAt > latest.sentAt) return message;
+              return latest;
+            },
+            null
+          );
+          const latestUnreadIdentityMessage =
+            unreadIdentityMessages.reduce<TestMessage | null>(
+              (latest, message) => {
+                if (!latest || message.sentAt > latest.sentAt) return message;
+                return latest;
+              },
+              null
+            );
+
+          if (!latestMessage) {
+            return {
+              conversationId: group.id,
+              conversationType: "group",
+              title: group.name,
+              subtitle: group.note || `${memberIdentities.length} 位成员`,
+              avatarLabel: group.avatarLabel,
+              color: group.color,
+              group,
+              memberIdentities,
+              records,
+              latestMessage: {
+                id: `empty-${group.id}`,
+                conversationId: group.id,
+                conversationType: "group",
+                identityId: demoSenderIdentityId,
+                text: "群聊能力已开启，可从后台发送群消息测试。",
+                sentAt: group.createdAt,
+                sender: "demo",
+              },
+              latestUnreadIdentityMessage: null,
+              unreadCount: 0,
+            };
+          }
+
+          return {
+            conversationId: group.id,
+            conversationType: "group",
+            title: group.name,
+            subtitle: group.note || `${memberIdentities.length} 位成员`,
+            avatarLabel: group.avatarLabel,
+            color: group.color,
+            group,
+            memberIdentities,
+            records,
+            latestMessage,
+            latestUnreadIdentityMessage,
+            unreadCount: unreadIdentityMessages.length,
+          };
+        });
+
+      return [...privateSummaries, ...groupSummaries]
+        .filter((summary): summary is TestConversationSummary => Boolean(summary))
+        .sort((a, b) => b.latestMessage.sentAt - a.latestMessage.sentAt);
+    },
+    [testConversationRecords, testGroups, testIdentities, testMessages, testReadState]
   );
 
   const unreadTestConversationCount = testConversationSummaries.reduce(
@@ -590,7 +709,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
             return latestPreview;
           }
           return {
-            identity: summary.identity,
+            summary,
             message: summary.latestUnreadIdentityMessage,
             unreadCount: summary.unreadCount,
           };
@@ -602,7 +721,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
 
   const activeTestConversationSummary =
     testConversationSummaries.find(
-      (summary) => summary.identity.id === activeTestIdentityId
+      (summary) => summary.conversationId === activeTestIdentityId
     ) ?? null;
 
   const mineStatisticRecords = React.useMemo(
@@ -740,16 +859,16 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
   );
 
   const markTestConversationAsRead = React.useCallback(
-    (identityId: string) => {
+    (conversationId: string) => {
       const latestMessageTime = testMessages.reduce((latest, message) => {
-        if (message.identityId !== identityId) return latest;
+        if (message.conversationId !== conversationId) return latest;
         return Math.max(latest, message.sentAt);
       }, 0);
 
       setTestReadState((prev) => {
         const nextReadState = {
           ...prev,
-          [identityId]: latestMessageTime || Date.now(),
+          [conversationId]: latestMessageTime || Date.now(),
         };
         persistTestReadState(nextReadState);
         return nextReadState;
@@ -760,13 +879,13 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
 
   const openTestConversation = React.useCallback(
     (
-      identityId: string,
+      conversationId: string,
       targetUid: string | null = null,
       returnContext: ConversationReturnContext = { mode: "drawer" }
     ) => {
-      markTestConversationAsRead(identityId);
+      markTestConversationAsRead(conversationId);
       setConversationReturnContext(returnContext);
-      setActiveTestIdentityId(identityId);
+      setActiveTestIdentityId(conversationId);
       setTestConversationTargetUid(targetUid);
       setShowMenu(false);
       setShowAiConversation(false);
@@ -799,11 +918,11 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
   }, [onNavigate]);
 
   const showBrowserMessageNotification = React.useCallback(
-    (identity: TestIdentity, message: TestMessage) => {
+    (summary: TestConversationSummary, message: TestMessage) => {
       if (typeof window === "undefined" || !("Notification" in window)) return;
 
       const showNotification = () => {
-        const notification = new Notification(identity.name, {
+        const notification = new Notification(summary.title, {
           body: message.text,
           icon: "/images/logo-jiwo-green.svg",
           tag: `arkme-demo-message-${message.id}`,
@@ -870,22 +989,22 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     );
     if (
       showTestConversation &&
-      activeTestIdentityId === latestMessage.identityId
+      activeTestIdentityId === latestMessage.conversationId
     ) {
       return;
     }
 
-    const identity = testIdentities.find(
-      (item) => item.id === latestMessage.identityId
+    const summary = testConversationSummaries.find(
+      (item) => item.conversationId === latestMessage.conversationId
     );
-    if (!identity) return;
+    if (!summary) return;
 
-    showBrowserMessageNotification(identity, latestMessage);
+    showBrowserMessageNotification(summary, latestMessage);
   }, [
     activeTestIdentityId,
     showBrowserMessageNotification,
     showTestConversation,
-    testIdentities,
+    testConversationSummaries,
     testMessages,
   ]);
 
@@ -898,20 +1017,24 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
       recordSnapshot: null,
     };
     openTestConversation(
-      homeMessagePreview.identity.id,
+      homeMessagePreview.summary.conversationId,
       `test-${homeMessagePreview.message.id}`,
       returnContext
     );
   }, [homeMessagePreview, openTestConversation]);
 
-  const createTestReply = React.useCallback((identityId: string, content: string) => {
-    const reply = createTestReplyMessage(identityId, content);
+  const createTestReply = React.useCallback((summary: TestConversationSummary, content: string) => {
+    const reply = createTestReplyMessage(
+      summary.conversationId,
+      content,
+      summary.conversationType
+    );
     setTestMessages((prev) => {
       const nextMessages = [...prev, reply];
       persistTestMessages(nextMessages);
       return nextMessages;
     });
-    markTestConversationAsRead(identityId);
+    markTestConversationAsRead(summary.conversationId);
     setTestConversationTargetUid(`test-${reply.id}`);
   }, [markTestConversationAsRead]);
 
@@ -931,8 +1054,8 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
         return;
       }
 
-      if (source.type === "test" && source.identityId) {
-        openTestConversation(source.identityId, source.recordUid ?? null, returnContext);
+      if (source.type === "test" && source.conversationId) {
+        openTestConversation(source.conversationId, source.recordUid ?? null, returnContext);
         return;
       }
 
@@ -1009,9 +1132,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           onBack={handleConversationBack}
           onOpenRecordDetail={setRecordDetail}
           onOpenRecordSnapshot={setRecordSnapshot}
-          onCreateReply={(content) =>
-            createTestReply(activeTestConversationSummary.identity.id, content)
-          }
+          onCreateReply={(content) => createTestReply(activeTestConversationSummary, content)}
         />
       );
     }
@@ -1103,8 +1224,8 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
             onOpenSendToSelf={() => {
               openSendToSelf(null);
             }}
-            onOpenTestConversation={(identityId) => {
-              openTestConversation(identityId);
+            onOpenTestConversation={(conversationId) => {
+              openTestConversation(conversationId);
             }}
             unreadAiConversationCount={unreadAiConversationCount}
             selfRecords={selfRecords}
@@ -1632,16 +1753,16 @@ function HomeNewMessagePreview({
       type="button"
       className="flex w-full items-center rounded-[16px] border border-border-light bg-surface px-3 py-2.5 text-left shadow-[0_8px_24px_rgba(15,23,42,0.08)] transition hover:bg-[var(--record-card-hover-bg)] active:scale-[0.99] dark:shadow-[0_10px_28px_rgba(0,0,0,0.28)]"
       onClick={onOpen}
-      aria-label={`${t("homeMessagePreview.label")}，${preview.identity.name}`}
+      aria-label={`${t("homeMessagePreview.label")}，${preview.summary.title}`}
     >
       <AvatarUnreadWrap unreadCount={preview.unreadCount}>
-        <TestIdentityAvatar identity={preview.identity} className="h-[34px] w-[34px]" />
+        <TestConversationAvatar summary={preview.summary} className="h-[34px] w-[34px]" />
       </AvatarUnreadWrap>
       <div className="ml-3 min-w-0 flex-1">
         <div className="flex items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-1.5">
             <p className="truncate text-[14px] font-medium leading-5 text-text">
-              {preview.identity.name}
+              {preview.summary.title}
             </p>
             <span className="shrink-0 rounded-full bg-primary-soft px-2 py-[2px] text-[10px] font-medium leading-3 text-primary">
               {t("homeMessagePreview.label")}
@@ -1700,7 +1821,7 @@ function MobileSideDrawer({
   onOpenAnswerGuide: () => void;
   onOpenAiConversation: () => void;
   onOpenSendToSelf: () => void;
-  onOpenTestConversation: (identityId: string) => void;
+  onOpenTestConversation: (conversationId: string) => void;
   unreadAiConversationCount: number;
   selfRecords: RecordItem[];
   testConversations: TestConversationSummary[];
@@ -1740,12 +1861,12 @@ function MobileSideDrawer({
           ),
         },
         ...testConversations.map((summary) => ({
-          key: `test-${summary.identity.id}`,
+          key: `test-${summary.conversationId}`,
           latestAt: summary.latestMessage.sentAt,
           node: (
             <TestConversationDrawerItem
               summary={summary}
-              onClick={() => onOpenTestConversation(summary.identity.id)}
+              onClick={() => onOpenTestConversation(summary.conversationId)}
             />
           ),
         })),
@@ -1960,19 +2081,22 @@ function TestConversationDrawerItem({
       onClick={onClick}
     >
       <AvatarUnreadWrap unreadCount={summary.unreadCount}>
-        <TestIdentityAvatar identity={summary.identity} className="h-[30px] w-[30px]" />
+        <TestConversationAvatar summary={summary} className="h-[30px] w-[30px]" />
       </AvatarUnreadWrap>
       <div className="ml-[7px] min-w-0 flex-1">
         <div className="flex items-center justify-between gap-2">
           <p className="truncate text-[15px] font-medium leading-5 text-text">
-            {summary.identity.name}
+            {summary.title}
           </p>
           <span className="shrink-0 text-[11px] text-text-tertiary">
             {formatBubbleTime(summary.latestMessage.sentAt)}
           </span>
         </div>
         <p className="mt-0.5 truncate text-xs leading-4 text-text-muted">
-          {summary.latestMessage.text}
+          {summary.conversationType === "group" &&
+          summary.latestMessage.sender === "identity"
+            ? `${summary.memberIdentities.find((identity) => identity.id === summary.latestMessage.identityId)?.name ?? "成员"}：${summary.latestMessage.text}`
+            : summary.latestMessage.text}
         </p>
       </div>
     </button>
@@ -2299,13 +2423,13 @@ function TestIdentityConversationChat({
           </svg>
         </button>
         <div className="ml-1 flex min-w-0 items-center gap-2">
-          <TestIdentityAvatar identity={summary.identity} className="h-8 w-8" />
+          <TestConversationAvatar summary={summary} className="h-8 w-8" />
           <div className="min-w-0">
             <h1 className="truncate text-[17px] font-semibold leading-5 text-text">
-              {summary.identity.name}
+              {summary.title}
             </h1>
             <p className="mt-0.5 truncate text-[11px] leading-3 text-text-tertiary">
-              {summary.identity.note || "测试私聊"}
+              {summary.subtitle}
             </p>
           </div>
         </div>
@@ -2361,15 +2485,22 @@ function TestIdentityConversationChat({
                   </div>
                 ) : (
                   <div className="flex items-start gap-2.5">
-                    <TestIdentityAvatar
-                      identity={summary.identity}
-                      className="mt-0.5 h-8 w-8"
+                    <TestMessageIdentityAvatar
+                      identityId={record.identityId}
+                      summary={summary}
                     />
                     <button
                       type="button"
                       className="max-w-[82%] rounded-[14px] rounded-tl-[4px] bg-surface px-3.5 py-2.5 text-left text-text shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition hover:bg-[var(--record-card-hover-bg)] active:scale-[0.99]"
                       onClick={() => onOpenRecordDetail(record)}
                     >
+                      {summary.conversationType === "group" && (
+                        <span className="mb-1 block text-[11px] leading-4 text-text-tertiary">
+                          {summary.memberIdentities.find(
+                            (identity) => identity.id === record.identityId
+                          )?.name ?? "群成员"}
+                        </span>
+                      )}
                       <p className="whitespace-pre-wrap break-words text-[14px] leading-[1.55]">
                         {record.text_content}
                       </p>
@@ -2412,6 +2543,48 @@ function TestIdentityAvatar({
       {identity.avatarLabel}
     </div>
   );
+}
+
+function TestConversationAvatar({
+  summary,
+  className,
+}: {
+  summary: TestConversationSummary;
+  className?: string;
+}) {
+  if (summary.identity) {
+    return <TestIdentityAvatar identity={summary.identity} className={className} />;
+  }
+
+  return (
+    <div
+      className={cn(
+        "flex shrink-0 items-center justify-center rounded-full text-[11px] font-semibold leading-none text-white",
+        className
+      )}
+      style={{ backgroundColor: summary.color }}
+      aria-hidden="true"
+    >
+      {summary.avatarLabel}
+    </div>
+  );
+}
+
+function TestMessageIdentityAvatar({
+  identityId,
+  summary,
+}: {
+  identityId: string;
+  summary: TestConversationSummary;
+}) {
+  const identity =
+    summary.memberIdentities.find((item) => item.id === identityId) ?? summary.identity;
+
+  if (identity) {
+    return <TestIdentityAvatar identity={identity} className="mt-0.5 h-8 w-8" />;
+  }
+
+  return <TestConversationAvatar summary={summary} className="mt-0.5 h-8 w-8" />;
 }
 
 function AnswerGuideChat({ onBack }: { onBack: () => void }) {

@@ -8,9 +8,22 @@ export type TestIdentity = {
 };
 
 export type TestMessageSender = "identity" | "demo";
+export type TestConversationType = "private" | "group";
+
+export type TestGroup = {
+  id: string;
+  name: string;
+  note: string;
+  avatarLabel: string;
+  color: string;
+  memberIdentityIds: string[];
+  createdAt: number;
+};
 
 export type TestMessage = {
   id: string;
+  conversationId: string;
+  conversationType: TestConversationType;
   identityId: string;
   text: string;
   sentAt: number;
@@ -20,9 +33,11 @@ export type TestMessage = {
 export type TestReadState = Record<string, number>;
 
 export const testIdentitiesStorageKey = "arkme-demo.testIdentities";
+export const testGroupsStorageKey = "arkme-demo.testGroups";
 export const testMessagesStorageKey = "arkme-demo.testMessages";
 export const testReadStateStorageKey = "arkme-demo.testReadState";
 export const testConversationStorageEvent = "arkme-demo:test-conversations-updated";
+export const demoSenderIdentityId = "demo";
 
 const identityColors = [
   "#09B83E",
@@ -49,6 +64,18 @@ const defaultIdentities: TestIdentity[] = [
     avatarLabel: "A",
     color: identityColors[1],
     createdAt: 1760000001000,
+  },
+];
+
+const defaultGroups: TestGroup[] = [
+  {
+    id: "group-candidate-test",
+    name: "候选测试群",
+    note: "用于模拟多人群聊测试",
+    avatarLabel: "群",
+    color: identityColors[2],
+    memberIdentityIds: defaultIdentities.map((identity) => identity.id),
+    createdAt: 1760000002000,
   },
 ];
 
@@ -91,6 +118,10 @@ export function pickIdentityColor(index: number) {
   return identityColors[index % identityColors.length];
 }
 
+export function getPrivateConversationId(identityId: string) {
+  return `private:${identityId}`;
+}
+
 function normalizeIdentity(value: unknown, index: number): TestIdentity | null {
   if (!value || typeof value !== "object") return null;
 
@@ -116,16 +147,53 @@ function normalizeMessage(value: unknown, index: number): TestMessage | null {
   if (!value || typeof value !== "object") return null;
 
   const message = value as Partial<TestMessage>;
-  const identityId = normalizeText(message.identityId);
+  const identityId =
+    normalizeText(message.identityId) ||
+    (message.sender === "demo" ? demoSenderIdentityId : "");
   const text = normalizeText(message.text);
   if (!identityId || !text) return null;
 
+  const conversationType: TestConversationType =
+    message.conversationType === "group" ? "group" : "private";
+  const conversationId =
+    normalizeText(message.conversationId) ||
+    (conversationType === "group"
+      ? normalizeText(message.identityId)
+      : getPrivateConversationId(identityId));
+
   return {
     id: normalizeText(message.id) || `message-${index}`,
+    conversationId,
+    conversationType,
     identityId,
     text,
     sentAt: normalizeTimestamp(message.sentAt, Date.now() + index),
     sender: message.sender === "demo" ? "demo" : "identity",
+  };
+}
+
+function normalizeGroup(value: unknown, index: number): TestGroup | null {
+  if (!value || typeof value !== "object") return null;
+
+  const group = value as Partial<TestGroup>;
+  const name = normalizeText(group.name);
+  if (!name) return null;
+
+  const id = normalizeText(group.id) || `group-${index}`;
+  const avatarLabel = normalizeText(group.avatarLabel) || buildAvatarLabel(name);
+  const color = normalizeText(group.color) || pickIdentityColor(index + 2);
+  const memberIdentityIds = Array.isArray(group.memberIdentityIds)
+    ? group.memberIdentityIds.map(normalizeText).filter(Boolean)
+    : [];
+
+  return {
+    id,
+    name,
+    note: normalizeText(group.note),
+    avatarLabel: Array.from(avatarLabel).slice(0, 2).join(""),
+    color,
+    memberIdentityIds,
+    createdAt: normalizeTimestamp(group.createdAt, Date.now() + index),
   };
 }
 
@@ -138,6 +206,17 @@ export function getInitialTestIdentities() {
     .filter((identity): identity is TestIdentity => Boolean(identity));
 
   return identities.length > 0 ? identities : defaultIdentities;
+}
+
+export function getInitialTestGroups() {
+  const parsedValue = readJsonValue(testGroupsStorageKey);
+  if (!Array.isArray(parsedValue)) return defaultGroups;
+
+  const groups = parsedValue
+    .map(normalizeGroup)
+    .filter((group): group is TestGroup => Boolean(group));
+
+  return groups.length > 0 ? groups : defaultGroups;
 }
 
 export function getInitialTestMessages() {
@@ -166,6 +245,11 @@ export function getInitialTestReadState() {
 
 export function persistTestIdentities(identities: TestIdentity[]) {
   writeJsonValue(testIdentitiesStorageKey, identities);
+  notifyTestConversationChange();
+}
+
+export function persistTestGroups(groups: TestGroup[]) {
+  writeJsonValue(testGroupsStorageKey, groups);
   notifyTestConversationChange();
 }
 
@@ -199,6 +283,8 @@ export function createTestMessage(identityId: string, text: string): TestMessage
   const timestamp = Date.now();
   return {
     id: `message-${timestamp}-${Math.random().toString(36).slice(2, 7)}`,
+    conversationId: getPrivateConversationId(identityId),
+    conversationType: "private",
     identityId,
     text: text.trim(),
     sentAt: timestamp,
@@ -206,10 +292,43 @@ export function createTestMessage(identityId: string, text: string): TestMessage
   };
 }
 
-export function createTestReplyMessage(identityId: string, text: string): TestMessage {
+export function createTestGroup(name: string, note: string, memberIdentityIds: string[], index: number): TestGroup {
+  const timestamp = Date.now();
+  return {
+    id: `group-${timestamp}-${Math.random().toString(36).slice(2, 7)}`,
+    name: name.trim(),
+    note: note.trim(),
+    avatarLabel: buildAvatarLabel(name),
+    color: pickIdentityColor(index + 2),
+    memberIdentityIds,
+    createdAt: timestamp,
+  };
+}
+
+export function createTestGroupMessage(groupId: string, identityId: string, text: string): TestMessage {
+  const timestamp = Date.now();
+  return {
+    id: `group-message-${timestamp}-${Math.random().toString(36).slice(2, 7)}`,
+    conversationId: groupId,
+    conversationType: "group",
+    identityId,
+    text: text.trim(),
+    sentAt: timestamp,
+    sender: "identity",
+  };
+}
+
+export function createTestReplyMessage(
+  conversationId: string,
+  text: string,
+  conversationType: TestConversationType = "private",
+  identityId: string = demoSenderIdentityId
+): TestMessage {
   const timestamp = Date.now();
   return {
     id: `reply-${timestamp}-${Math.random().toString(36).slice(2, 7)}`,
+    conversationId,
+    conversationType,
     identityId,
     text: text.trim(),
     sentAt: timestamp,

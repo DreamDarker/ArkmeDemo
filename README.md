@@ -12,14 +12,25 @@
 
 `docs/candidate-rules.md` 是本项目内的答题标准。候选人不需要额外安装本地 Skill，但需要让 Codex 按该文件完成需求分析、代码修改、验证和记录。
 
+## 本地测试入口
+
+本项目保留两个本地测试入口：
+
+- 移动端 Demo：http://127.0.0.1:5173/
+- 消息测试后台：http://127.0.0.1:5173/sendtest
+
+候选人让 Codex 完成一次改动后，可以根据最终输出中的链接打开对应页面测试。若本轮改动影响移动端 Demo，最终输出应给出移动端 Demo 链接；若影响消息测试后台，最终输出应给出消息测试后台链接；若两端都受影响，最终输出应同时给出两个链接。
+
 ## Codex 迭代记录要求
 
-候选人每次在 AI 编程工具中输入新的需求后，AI 助手应先检查上一轮输入输出是否已经同步写入 Markdown 日志和 UI 数据源。若缺失，应先补齐上一轮记录，再继续处理新的需求。
+候选人每次在 AI 编程工具中输入新的需求后，AI 助手应先检查上一轮输入输出是否已经同步写入当前候选人的个人 Markdown 日志和 UI 数据源。若缺失，应先补齐上一轮记录，再继续处理新的需求。
+
+AI 助手还需要检查 `.codex/candidate-session.json` 是否已经存在，并确认其中的日志路径指向当前候选人的个人日志。若缺失，应先引导候选人明确输入自己的真实姓名，再创建个人日志文件。候选人名称不能从 GitHub、Git 配置、本机用户名、邮箱或目录名推断。
 
 候选人每次使用 Codex 对项目进行一次需求分析、代码修改或验证后，都需要让 Codex 把本轮过程追加写入：
 
 ```text
-docs/codex-iteration-log.md
+docs/codex-logs/candidate-<候选人明确输入的姓名>-<本机用户名>-<时间戳>-<短哈希>.md
 src/data/aiConversationLog.ts
 ```
 
@@ -31,7 +42,7 @@ src/data/aiConversationLog.ts
 - 本轮改动文件
 - 验证结果
 
-其中 `docs/codex-iteration-log.md` 用于源码审阅，`src/data/aiConversationLog.ts` 用于应用侧边栏里的“和AI编程工具对话”展示。
+其中 `docs/codex-iteration-log.md` 只是共享格式模板；`docs/codex-logs/` 下的个人日志用于源码审阅；`src/data/aiConversationLog.ts` 用于应用侧边栏里的“和AI编程工具对话”展示，初始为空，后续只写入当前候选人的记录。
 
 最终提交 GitHub 前，请运行：
 
@@ -39,4 +50,4 @@ src/data/aiConversationLog.ts
 pnpm verify:answer
 ```
 
-面试官会结合最终代码、Git 提交历史和 `docs/codex-iteration-log.md` 判断候选人使用 AI 迭代项目的过程。
+面试官会结合最终代码、Git 提交历史和 `docs/codex-logs/` 下的候选人个人日志判断候选人使用 AI 迭代项目的过程。

@@ -12,6 +12,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "lint": "eslint .",
+    "codex:init-log": "node scripts/ensure-candidate-log.mjs",
     "verify:codex-log": "node scripts/verify-codex-log.mjs",
     "verify:answer-standard": "node scripts/verify-answer-standard.mjs",
     "verify:answer": "pnpm lint && pnpm build && pnpm verify:codex-log && pnpm verify:answer-standard"

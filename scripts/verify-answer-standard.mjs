@@ -8,6 +8,7 @@ const requiredFiles = [
   "docs/candidate-rules.md",
   "docs/codex-iteration-log.md",
   "src/data/aiConversationLog.ts",
+  "scripts/ensure-candidate-log.mjs",
   "scripts/verify-codex-log.mjs",
   "scripts/verify-answer-standard.mjs",
 ];
@@ -26,23 +27,38 @@ requiredFiles.forEach((file) => {
 const agents = readFileSync("AGENTS.md", "utf8");
 const readme = readFileSync("README.md", "utf8");
 const candidateRules = readFileSync("docs/candidate-rules.md", "utf8");
+const codexLog = readFileSync("docs/codex-iteration-log.md", "utf8");
 const aiConversationLog = readFileSync("src/data/aiConversationLog.ts", "utf8");
+const ensureCandidateLog = readFileSync("scripts/ensure-candidate-log.mjs", "utf8");
 const packageJson = JSON.parse(readFileSync("package.json", "utf8"));
 const scripts = packageJson.scripts ?? {};
 
 const requiredMentions = [
   ["AGENTS.md", agents, "docs/candidate-rules.md"],
   ["AGENTS.md", agents, "Pre-Response Log Check"],
-  ["AGENTS.md", agents, "docs/codex-iteration-log.md"],
+  ["AGENTS.md", agents, "docs/codex-logs/"],
+  ["AGENTS.md", agents, ".codex/candidate-session.json"],
+  ["AGENTS.md", agents, "cannot be inferred from GitHub"],
   ["AGENTS.md", agents, "src/data/aiConversationLog.ts"],
+  ["AGENTS.md", agents, "候选人名称"],
   ["AGENTS.md", agents, "pnpm verify:answer"],
   ["README.md", readme, "docs/candidate-rules.md"],
-  ["README.md", readme, "docs/codex-iteration-log.md"],
+  ["README.md", readme, "docs/codex-logs/"],
+  ["README.md", readme, ".codex/candidate-session.json"],
+  ["README.md", readme, "不能从 GitHub"],
   ["README.md", readme, "src/data/aiConversationLog.ts"],
   ["README.md", readme, "先检查上一轮输入输出"],
+  ["README.md", readme, "候选人名称"],
   ["README.md", readme, "pnpm verify:answer"],
   ["docs/candidate-rules.md", candidateRules, "新一轮对话前置检查"],
   ["docs/candidate-rules.md", candidateRules, "src/data/aiConversationLog.ts"],
+  ["docs/candidate-rules.md", candidateRules, "docs/codex-logs/"],
+  ["docs/candidate-rules.md", candidateRules, ".codex/candidate-session.json"],
+  ["docs/candidate-rules.md", candidateRules, "候选人名称"],
+  ["docs/candidate-rules.md", candidateRules, "不能从 GitHub"],
+  ["docs/codex-iteration-log.md", codexLog, "Codex 迭代记录模板"],
+  ["docs/codex-iteration-log.md", codexLog, "docs/codex-logs/"],
+  ["scripts/ensure-candidate-log.mjs", ensureCandidateLog, "markdownLogPath"],
 ];
 
 requiredMentions.forEach(([file, content, phrase]) => {
@@ -53,6 +69,10 @@ requiredMentions.forEach(([file, content, phrase]) => {
 
 if (!scripts["verify:codex-log"]) {
   fail("package.json is missing scripts.verify:codex-log");
+}
+
+if (!scripts["codex:init-log"]) {
+  fail("package.json is missing scripts.codex:init-log");
 }
 
 if (!scripts["verify:answer-standard"]) {

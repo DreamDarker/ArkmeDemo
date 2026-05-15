@@ -8,6 +8,7 @@ export type RecordSourceConversation = {
   entryIndex?: number;
   recordUid?: string;
   identityId?: string;
+  conversationId?: string;
 };
 
 export type RecordReference = {
