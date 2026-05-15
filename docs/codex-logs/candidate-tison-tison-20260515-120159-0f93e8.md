@@ -154,6 +154,23 @@
 - 首次运行 pnpm verify:answer 时发现旧版 verify-answer-standard 仍强制 README 展示 docs/codex-logs/ 等底层机制，已同步调整为只检查 README 的候选人核心信息，底层机制改由 AGENTS.md 和 docs/candidate-rules.md 承担
 - pnpm verify:answer 通过
 
+## 2026-05-15 19:05:14 CST (+0800)
+
+### 用户输入
+红框的里边内容似乎也没必要？
+
+### AI 最终输出
+已删除 README 候选人答题流程中红框对应的补充说明，包括 `docs/candidate-rules.md` 解释和 `docs/arrangements-requirements.md` 路径提示。README 仍保留候选人需要先发给 Codex 的规范读取指令、本地测试入口，以及下方直接内联的「安排」模块原始需求口述。
+
+### 本轮改动文件
+- README.md
+- docs/codex-logs/candidate-tison-tison-20260515-120159-0f93e8.md
+- src/data/aiConversationLog.ts
+
+### 验证结果
+- 已确认上一轮 README 精简记录存在于当前候选人个人日志和 src/data/aiConversationLog.ts
+- pnpm verify:answer 通过
+
 ## 2026-05-15 18:32:40 CST (+0800)
 
 ### 用户输入

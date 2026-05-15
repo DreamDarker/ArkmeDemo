@@ -10,14 +10,6 @@
 请先阅读 AGENTS.md 和 docs/candidate-rules.md，然后按其中的答题规范完成后续需求。
 ```
 
-`docs/candidate-rules.md` 是本项目内的答题标准。候选人不需要额外安装本地 Skill，但需要让 Codex 按该文件完成需求分析、代码修改、验证和记录。
-
-本轮候选人需要实现的「安排」模块原始需求口述见：
-
-```text
-docs/arrangements-requirements.md
-```
-
 ## 本地测试入口
 
 默认测试入口：
