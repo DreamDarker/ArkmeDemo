@@ -60,6 +60,30 @@ Use this format:
 
 In `src/data/aiConversationLog.ts`, append the matching entry to `aiConversationLogEntries` with the same timestamp, user input, AI final output, changed files, and verification result. The seed repository keeps this file empty; each candidate's clone should fill it with that candidate's own process only.
 
+## Codex Interview Upload Rule
+
+If the interview upload environment variables are provided, after each Codex iteration has been written to the personal Markdown log and `src/data/aiConversationLog.ts`, run:
+
+```sh
+pnpm codex:upload-interview
+```
+
+This command performs the cloud upload flow defined by the interview upload contract: register the candidate session, prepare upload slots for `codex.iteration_markdown` and `codex.iteration_ui_data`, then `PUT` both updated files to the returned OSS URLs. The intended meaning of "realtime" in this project is one upload after each completed user/AI conversation round, not per-second streaming.
+
+Required environment variables:
+
+- `CODEX_INTERVIEW_CANDIDATE_UID`
+- `CODEX_INTERVIEW_EXAM_KEY`
+
+The default upload service host is `https://team.jotmo.cc`.
+
+Optional environment variables:
+
+- `CODEX_INTERVIEW_API_BASE` to override the default host
+- `CODEX_INTERVIEW_CODEX_SESSION_ID`
+
+If any required upload variable is missing, do not invent it. Finish the local iteration normally, report that cloud upload could not be executed, and ask for the missing externally supplied value.
+
 Before finishing a task, run the full answer verification:
 
 ```sh

@@ -2390,6 +2390,8 @@ function TestIdentityConversationChat({
   onCreateReply: (content: string) => void;
 }) {
   const { resolvedLocale, t } = usePreferences();
+  const candidateProfile = useCandidateProfile();
+  const selfDisplayName = candidateProfile?.name || t("recordDetail.me");
   const scrollContainerRef = React.useRef<HTMLDivElement>(null);
   const recordRefs = React.useRef<Map<string, HTMLDivElement>>(new Map());
   const sortedRecords = React.useMemo(
@@ -2479,6 +2481,9 @@ function TestIdentityConversationChat({
                       textContent={record.text_content}
                       disableAnimation
                       variant="primary"
+                      topLabel={
+                        summary.conversationType === "group" ? selfDisplayName : undefined
+                      }
                       onOpenDetail={() => onOpenRecordDetail(record)}
                       onOpenMemorySnapshot={() => onOpenRecordSnapshot(record)}
                     />
@@ -2489,22 +2494,24 @@ function TestIdentityConversationChat({
                       identityId={record.identityId}
                       summary={summary}
                     />
-                    <button
-                      type="button"
-                      className="max-w-[82%] rounded-[14px] rounded-tl-[4px] bg-surface px-3.5 py-2.5 text-left text-text shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition hover:bg-[var(--record-card-hover-bg)] active:scale-[0.99]"
-                      onClick={() => onOpenRecordDetail(record)}
-                    >
+                    <div className="min-w-0 max-w-[82%]">
                       {summary.conversationType === "group" && (
-                        <span className="mb-1 block text-[11px] leading-4 text-text-tertiary">
+                        <p className="mb-1 px-1 text-[11px] leading-4 text-text-tertiary">
                           {summary.memberIdentities.find(
                             (identity) => identity.id === record.identityId
                           )?.name ?? "群成员"}
-                        </span>
+                        </p>
                       )}
-                      <p className="whitespace-pre-wrap break-words text-[14px] leading-[1.55]">
-                        {record.text_content}
-                      </p>
-                    </button>
+                      <button
+                        type="button"
+                        className="max-w-full rounded-[14px] rounded-tl-[4px] bg-surface px-3.5 py-2.5 text-left text-text shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition hover:bg-[var(--record-card-hover-bg)] active:scale-[0.99]"
+                        onClick={() => onOpenRecordDetail(record)}
+                      >
+                        <p className="whitespace-pre-wrap break-words text-[14px] leading-[1.55]">
+                          {record.text_content}
+                        </p>
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>

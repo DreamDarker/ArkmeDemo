@@ -905,8 +905,10 @@ function MessageBubble({
     <button
       type="button"
       className={cn(
-        "max-w-[76%] rounded-[12px] border border-[var(--admin-border-subtle)] bg-[var(--admin-bubble-bg)] px-3.5 py-2.5 text-left text-text [box-shadow:var(--shadow-sm)] transition hover:bg-[var(--admin-bubble-hover-bg)] active:scale-[0.995] focus:outline-none focus-visible:[box-shadow:var(--admin-input-focus-shadow)]",
-        align === "right" ? "rounded-tr-[4px]" : "rounded-tl-[4px]"
+        "rounded-[12px] border border-[var(--admin-border-subtle)] bg-[var(--admin-bubble-bg)] px-3.5 py-2.5 text-left text-text [box-shadow:var(--shadow-sm)] transition hover:bg-[var(--admin-bubble-hover-bg)] active:scale-[0.995] focus:outline-none focus-visible:[box-shadow:var(--admin-input-focus-shadow)]",
+        align === "right"
+          ? "w-fit max-w-full rounded-tr-[4px]"
+          : "max-w-[76%] rounded-tl-[4px]"
       )}
       onContextMenu={(event) => {
         event.preventDefault();
