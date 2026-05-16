@@ -101,12 +101,37 @@ type TestConversationRecord = RecordItem & {
   identityId: string;
 };
 
-type ArrangementStatus = "todo" | "completed" | "paused";
+type ArrangementStatus = "todo" | "expired" | "completed" | "paused";
+type ArrangementKind = "task" | "schedule" | "reminder" | "note";
+type ArrangementPriority = "low" | "normal" | "important" | "urgent";
+type ArrangementSourceType = "manual" | "text" | "conversation";
+
+type ArrangementChecklistItem = {
+  uid: string;
+  text: string;
+  completed: boolean;
+};
+
+type ArrangementSource = {
+  type: ArrangementSourceType;
+  label: string;
+  text: string;
+};
 
 type ArrangementItem = {
   uid: string;
   title: string;
   content: string;
+  kind: ArrangementKind;
+  priority: ArrangementPriority;
+  location: string;
+  participants: string[];
+  tags: string[];
+  checklist: ArrangementChecklistItem[];
+  completionCriteria: string;
+  source: ArrangementSource;
+  sources: ArrangementSource[];
+  mergeGroupId: string | null;
   scheduledAt: number | null;
   status: ArrangementStatus;
   completedAt: number | null;
@@ -273,9 +298,13 @@ function normalizeStoredArrangement(value: unknown): ArrangementItem | null {
       ? arrangement.scheduledAt
       : null;
   const status: ArrangementStatus =
-    arrangement.status === "completed" || arrangement.status === "paused"
+    arrangement.status === "completed" ||
+    arrangement.status === "paused" ||
+    arrangement.status === "expired"
       ? arrangement.status
       : "todo";
+  const normalizedStatus: ArrangementStatus =
+    status === "todo" ? getOpenArrangementStatus(scheduledAt) : status;
   const completedAt =
     typeof arrangement.completedAt === "number" && Number.isFinite(arrangement.completedAt)
       ? arrangement.completedAt
@@ -284,18 +313,170 @@ function normalizeStoredArrangement(value: unknown): ArrangementItem | null {
     typeof arrangement.pausedAt === "number" && Number.isFinite(arrangement.pausedAt)
       ? arrangement.pausedAt
       : null;
+  const kind: ArrangementKind =
+    arrangement.kind === "schedule" ||
+    arrangement.kind === "reminder" ||
+    arrangement.kind === "note"
+      ? arrangement.kind
+      : "task";
+  const priority: ArrangementPriority =
+    arrangement.priority === "low" ||
+    arrangement.priority === "important" ||
+    arrangement.priority === "urgent"
+      ? arrangement.priority
+      : "normal";
+
+  const source = normalizeArrangementSource(arrangement.source);
 
   return {
     uid: arrangement.uid,
     title: arrangement.title,
     content: arrangement.content,
+    kind,
+    priority,
+    location: typeof arrangement.location === "string" ? arrangement.location.trim() : "",
+    participants: normalizeArrangementTextList(arrangement.participants),
+    tags: normalizeArrangementTextList(arrangement.tags),
+    checklist: normalizeArrangementChecklist(arrangement.checklist),
+    completionCriteria:
+      typeof arrangement.completionCriteria === "string"
+        ? arrangement.completionCriteria.trim()
+        : "",
+    source,
+    sources: normalizeArrangementSources(arrangement.sources, source),
+    mergeGroupId:
+      typeof arrangement.mergeGroupId === "string" && arrangement.mergeGroupId.trim()
+        ? arrangement.mergeGroupId.trim()
+        : null,
     scheduledAt,
-    status,
+    status: normalizedStatus,
     completedAt,
     pausedAt,
     createAt: arrangement.createAt,
     updateAt: arrangement.updateAt,
   };
+}
+
+const arrangementKindOptions: Array<{ value: ArrangementKind; label: string }> = [
+  { value: "task", label: "任务" },
+  { value: "schedule", label: "日程" },
+  { value: "reminder", label: "提醒" },
+  { value: "note", label: "待定" },
+];
+
+const arrangementPriorityOptions: Array<{ value: ArrangementPriority; label: string }> = [
+  { value: "normal", label: "普通" },
+  { value: "important", label: "重要" },
+  { value: "urgent", label: "紧急" },
+  { value: "low", label: "低优先" },
+];
+
+const defaultArrangementSource: ArrangementSource = {
+  type: "manual",
+  label: "手动创建",
+  text: "",
+};
+
+function getArrangementKindLabel(kind: ArrangementKind) {
+  return arrangementKindOptions.find((option) => option.value === kind)?.label ?? "任务";
+}
+
+function getArrangementPriorityLabel(priority: ArrangementPriority) {
+  return (
+    arrangementPriorityOptions.find((option) => option.value === priority)?.label ?? "普通"
+  );
+}
+
+function getArrangementPriorityPillClass(priority: ArrangementPriority) {
+  if (priority === "urgent") {
+    return "bg-rose-100 text-rose-700 dark:bg-rose-950/70 dark:text-rose-300";
+  }
+  if (priority === "important") {
+    return "bg-amber-100 text-amber-700 dark:bg-amber-950/70 dark:text-amber-300";
+  }
+  if (priority === "low") {
+    return "bg-surface-subtle text-text-tertiary";
+  }
+  return "bg-primary-soft text-primary";
+}
+
+function normalizeArrangementTextList(value: unknown) {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function normalizeArrangementChecklist(value: unknown): ArrangementChecklistItem[] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .filter((item): item is Partial<ArrangementChecklistItem> =>
+      Boolean(item) && typeof item === "object" && typeof item.text === "string"
+    )
+    .map((item, index) => ({
+      uid:
+        typeof item.uid === "string" && item.uid.trim()
+          ? item.uid
+          : `checklist-${index}`,
+      text: item.text?.trim() ?? "",
+      completed: item.completed === true,
+    }))
+    .filter((item) => item.text.length > 0);
+}
+
+function normalizeArrangementSource(value: unknown): ArrangementSource {
+  if (!value || typeof value !== "object") return defaultArrangementSource;
+
+  const source = value as Partial<ArrangementSource>;
+  const type: ArrangementSourceType =
+    source.type === "text" || source.type === "conversation" ? source.type : "manual";
+
+  return {
+    type,
+    label:
+      typeof source.label === "string" && source.label.trim()
+        ? source.label.trim()
+        : type === "manual"
+          ? "手动创建"
+          : "文本识别",
+    text: typeof source.text === "string" ? source.text.trim() : "",
+  };
+}
+
+function normalizeArrangementSources(value: unknown, fallback: ArrangementSource) {
+  if (!Array.isArray(value)) return [fallback];
+
+  const sources = value
+    .map(normalizeArrangementSource)
+    .filter((source) => source.label || source.text);
+
+  return sources.length > 0 ? sources : [fallback];
+}
+
+function parseArrangementTextList(value: string) {
+  return value
+    .split(/[\n,，、]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function formatArrangementTextList(items: string[]) {
+  return items.join("、");
+}
+
+function parseArrangementChecklist(value: string, now: number): ArrangementChecklistItem[] {
+  return value
+    .split(/\n/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((text, index) => ({
+      uid: `checklist-${now}-${index}`,
+      text,
+      completed: false,
+    }));
 }
 
 function getInitialArrangements() {
@@ -359,10 +540,15 @@ function parseArrangementScheduledTime(value: string) {
   return Number.isFinite(parsedValue) ? parsedValue : null;
 }
 
+function getOpenArrangementStatus(scheduledAt: number | null, now = Date.now()): ArrangementStatus {
+  return scheduledAt !== null && scheduledAt < now ? "expired" : "todo";
+}
+
 function getArrangementStatusLabel(status: ArrangementStatus) {
-  if (status === "completed") return "已完成";
-  if (status === "paused") return "已暂缓";
-  return "待处理";
+  if (status === "completed") return "\u5b8c\u6210";
+  if (status === "paused") return "\u6682\u7f13";
+  if (status === "expired") return "\u5df2\u8fc7\u671f";
+  return "\u5f85\u5904\u7406";
 }
 
 function getNextFriday() {
@@ -378,6 +564,9 @@ function getArrangementStatusCardClass(status: ArrangementStatus) {
   if (status === "completed") {
     return "border-emerald-200 bg-emerald-50/80 dark:border-emerald-900/60 dark:bg-emerald-950/20";
   }
+  if (status === "expired") {
+    return "border-rose-200 bg-rose-50/80 dark:border-rose-900/60 dark:bg-rose-950/20";
+  }
   if (status === "paused") {
     return "border-amber-300/70 bg-amber-50/80 dark:border-amber-900/60 dark:bg-amber-950/20";
   }
@@ -386,6 +575,7 @@ function getArrangementStatusCardClass(status: ArrangementStatus) {
 
 function getArrangementStatusDotClass(status: ArrangementStatus) {
   if (status === "completed") return "bg-emerald-500";
+  if (status === "expired") return "bg-rose-500";
   if (status === "paused") return "bg-amber-500";
   return "bg-primary";
 }
@@ -393,6 +583,9 @@ function getArrangementStatusDotClass(status: ArrangementStatus) {
 function getArrangementStatusPillClass(status: ArrangementStatus) {
   if (status === "completed") {
     return "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/70 dark:text-emerald-300";
+  }
+  if (status === "expired") {
+    return "bg-rose-100 text-rose-700 dark:bg-rose-950/70 dark:text-rose-300";
   }
   if (status === "paused") {
     return "bg-amber-100 text-amber-700 dark:bg-amber-950/70 dark:text-amber-300";
@@ -2882,6 +3075,14 @@ function ArrangementsPreview() {
   const [title, setTitle] = React.useState("");
   const [content, setContent] = React.useState("");
   const [scheduledTime, setScheduledTime] = React.useState("");
+  const [kind, setKind] = React.useState<ArrangementKind>("task");
+  const [priority, setPriority] = React.useState<ArrangementPriority>("normal");
+  const [location, setLocation] = React.useState("");
+  const [participantsText, setParticipantsText] = React.useState("");
+  const [tagsText, setTagsText] = React.useState("");
+  const [checklistText, setChecklistText] = React.useState("");
+  const [completionCriteria, setCompletionCriteria] = React.useState("");
+  const [sourceText, setSourceText] = React.useState("");
   const [saveHint, setSaveHint] = React.useState("");
   const activeArrangement =
     arrangements.find((arrangement) => arrangement.uid === activeArrangementId) ?? null;
@@ -2889,6 +3090,7 @@ function ArrangementsPreview() {
     arrangements.find((arrangement) => arrangement.uid === editingArrangementId) ?? null;
   const canSubmit = title.trim().length > 0 && content.trim().length > 0;
   const todoCount = arrangements.filter((item) => item.status === "todo").length;
+  const expiredCount = arrangements.filter((item) => item.status === "expired").length;
   const pausedCount = arrangements.filter((item) => item.status === "paused").length;
   const completedCount = arrangements.filter((item) => item.status === "completed").length;
   const sortedArrangements = React.useMemo(
@@ -2896,18 +3098,40 @@ function ArrangementsPreview() {
       [...arrangements].sort((a, b) => {
         const statusRank: Record<ArrangementStatus, number> = {
           todo: 0,
-          paused: 1,
-          completed: 2,
+          expired: 1,
+          paused: 2,
+          completed: 3,
         };
         return statusRank[a.status] - statusRank[b.status] || b.updateAt - a.updateAt;
       }),
     [arrangements]
   );
 
+  React.useEffect(() => {
+    const now = Date.now();
+    const nextArrangements = arrangements.map((arrangement) =>
+      arrangement.status === "todo" && arrangement.scheduledAt !== null && arrangement.scheduledAt < now
+        ? { ...arrangement, status: "expired" as ArrangementStatus, updateAt: now }
+        : arrangement
+    );
+
+    if (nextArrangements.some((arrangement, index) => arrangement !== arrangements[index])) {
+      persistNextArrangements(nextArrangements);
+    }
+  }, [arrangements]);
+
   const resetForm = () => {
     setTitle("");
     setContent("");
     setScheduledTime("");
+    setKind("task");
+    setPriority("normal");
+    setLocation("");
+    setParticipantsText("");
+    setTagsText("");
+    setChecklistText("");
+    setCompletionCriteria("");
+    setSourceText("");
     setEditingArrangementId(null);
   };
 
@@ -2919,6 +3143,7 @@ function ArrangementsPreview() {
   const openCreateForm = () => {
     resetForm();
     setShowForm(true);
+    setActiveArrangementId(null);
     setSaveHint("");
   };
 
@@ -2926,6 +3151,14 @@ function ArrangementsPreview() {
     setTitle(arrangement.title);
     setContent(arrangement.content);
     setScheduledTime(toDateTimeLocalValue(arrangement.scheduledAt));
+    setKind(arrangement.kind);
+    setPriority(arrangement.priority);
+    setLocation(arrangement.location);
+    setParticipantsText(formatArrangementTextList(arrangement.participants));
+    setTagsText(formatArrangementTextList(arrangement.tags));
+    setChecklistText(arrangement.checklist.map((item) => item.text).join("\n"));
+    setCompletionCriteria(arrangement.completionCriteria);
+    setSourceText(arrangement.sources[0]?.text ?? arrangement.source.text);
     setEditingArrangementId(arrangement.uid);
     setShowForm(true);
     setSaveHint("");
@@ -2948,13 +3181,49 @@ function ArrangementsPreview() {
 
     const now = Date.now();
     const scheduledAt = parseArrangementScheduledTime(scheduledTime);
+    const participants = parseArrangementTextList(participantsText);
+    const tags = parseArrangementTextList(tagsText);
+    const checklist = parseArrangementChecklist(checklistText, now);
+    const normalizedLocation = location.trim();
+    const normalizedCompletionCriteria = completionCriteria.trim();
+    const normalizedSourceText = sourceText.trim();
+    const nextSource: ArrangementSource = {
+      ...defaultArrangementSource,
+      text: normalizedSourceText,
+    };
+    const nextOpenStatus = getOpenArrangementStatus(scheduledAt, now);
 
     if (editingArrangement) {
       updateArrangement(editingArrangement.uid, (arrangement) => ({
         ...arrangement,
         title: title.trim(),
         content: content.trim(),
+        kind,
+        priority,
+        location: normalizedLocation,
+        participants,
+        tags,
+        checklist,
+        completionCriteria: normalizedCompletionCriteria,
+        source: {
+          ...nextSource,
+          label: arrangement.source.label,
+          type: arrangement.source.type,
+          text: normalizedSourceText,
+        },
+        sources: [
+          {
+            ...nextSource,
+            label: arrangement.sources[0]?.label ?? arrangement.source.label,
+            type: arrangement.sources[0]?.type ?? arrangement.source.type,
+          },
+          ...arrangement.sources.slice(1),
+        ],
         scheduledAt,
+        status:
+          arrangement.status === "todo" || arrangement.status === "expired"
+            ? nextOpenStatus
+            : arrangement.status,
         updateAt: now,
       }));
       setSaveHint("安排已更新");
@@ -2963,8 +3232,20 @@ function ArrangementsPreview() {
         uid: `arrangement-${now}-${Math.random().toString(36).slice(2, 8)}`,
         title: title.trim(),
         content: content.trim(),
+        kind,
+        priority,
+        location: normalizedLocation,
+        participants,
+        tags,
+        checklist,
+        completionCriteria: normalizedCompletionCriteria,
+        source: {
+          ...nextSource,
+        },
+        sources: [nextSource],
+        mergeGroupId: null,
         scheduledAt,
-        status: "todo",
+        status: nextOpenStatus,
         completedAt: null,
         pausedAt: null,
         createAt: now,
@@ -2982,7 +3263,7 @@ function ArrangementsPreview() {
     const now = Date.now();
     updateArrangement(uid, (arrangement) => ({
       ...arrangement,
-      status,
+      status: status === "todo" ? getOpenArrangementStatus(arrangement.scheduledAt, now) : status,
       completedAt: status === "completed" ? now : null,
       pausedAt: status === "paused" ? now : null,
       updateAt: now,
@@ -2997,6 +3278,14 @@ function ArrangementsPreview() {
         title={title}
         content={content}
         scheduledTime={scheduledTime}
+        kind={kind}
+        priority={priority}
+        location={location}
+        participantsText={participantsText}
+        tagsText={tagsText}
+        checklistText={checklistText}
+        completionCriteria={completionCriteria}
+        sourceText={sourceText}
         canSubmit={canSubmit}
         onBack={() => {
           setActiveArrangementId(null);
@@ -3012,6 +3301,14 @@ function ArrangementsPreview() {
         onTitleChange={setTitle}
         onContentChange={setContent}
         onScheduledTimeChange={setScheduledTime}
+        onKindChange={setKind}
+        onPriorityChange={setPriority}
+        onLocationChange={setLocation}
+        onParticipantsTextChange={setParticipantsText}
+        onTagsTextChange={setTagsText}
+        onChecklistTextChange={setChecklistText}
+        onCompletionCriteriaChange={setCompletionCriteria}
+        onSourceTextChange={setSourceText}
         onComplete={() => changeStatus(activeArrangement.uid, "completed")}
         onPause={() => changeStatus(activeArrangement.uid, "paused")}
         onRestore={() => changeStatus(activeArrangement.uid, "todo")}
@@ -3019,9 +3316,71 @@ function ArrangementsPreview() {
     );
   }
 
+  if (showForm) {
+    return (
+      <div className="flex h-full flex-col bg-bg">
+        <ArrangementPageHeader
+          title={"\u6dfb\u52a0\u5b89\u6392"}
+          onBack={() => {
+            setShowForm(false);
+            resetForm();
+          }}
+          rightAction={
+            <button
+              type="submit"
+              form="arrangement-create-form"
+              disabled={!canSubmit}
+              className="flex h-10 min-w-10 items-center justify-center rounded-full px-3 text-sm font-semibold text-primary transition hover:bg-hover-overlay active:scale-[0.96] disabled:opacity-35"
+            >
+              {"\u4fdd\u5b58"}
+            </button>
+          }
+        />
+        <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-5 pt-2">
+          <article className="rounded-[12px] border border-[var(--record-card-border)] bg-[var(--record-card-bg)] px-3 py-4 shadow-[var(--mine-card-shadow)]">
+            <ArrangementForm
+              formId="arrangement-create-form"
+              title={title}
+              content={content}
+              scheduledTime={scheduledTime}
+              kind={kind}
+              priority={priority}
+              location={location}
+              participantsText={participantsText}
+              tagsText={tagsText}
+              checklistText={checklistText}
+              completionCriteria={completionCriteria}
+              sourceText={sourceText}
+              canSubmit={canSubmit}
+              submitLabel={"\u4fdd\u5b58"}
+              showActions={false}
+              onSubmit={handleSubmit}
+              onCancel={() => {
+                setShowForm(false);
+                resetForm();
+              }}
+              onTitleChange={setTitle}
+              onContentChange={setContent}
+              onScheduledTimeChange={setScheduledTime}
+              onKindChange={setKind}
+              onPriorityChange={setPriority}
+              onLocationChange={setLocation}
+              onParticipantsTextChange={setParticipantsText}
+              onTagsTextChange={setTagsText}
+              onChecklistTextChange={setChecklistText}
+              onCompletionCriteriaChange={setCompletionCriteria}
+              onSourceTextChange={setSourceText}
+            />
+          </article>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-full flex-col bg-bg">
-      <header className="flex h-14 shrink-0 items-center justify-between bg-bg px-4">
+      <ArrangementPageHeader title={"\u5b89\u6392"} />
+      <header className="hidden">
         <div className="min-w-0">
           <h1 className="truncate text-lg font-semibold text-text">安排</h1>
           <p className="mt-0.5 truncate text-xs leading-4 text-text-muted">
@@ -3045,6 +3404,14 @@ function ArrangementsPreview() {
               title={title}
               content={content}
               scheduledTime={scheduledTime}
+              kind={kind}
+              priority={priority}
+              location={location}
+              participantsText={participantsText}
+              tagsText={tagsText}
+              checklistText={checklistText}
+              completionCriteria={completionCriteria}
+              sourceText={sourceText}
               canSubmit={canSubmit}
               submitLabel="保存"
               onSubmit={handleSubmit}
@@ -3055,6 +3422,14 @@ function ArrangementsPreview() {
               onTitleChange={setTitle}
               onContentChange={setContent}
               onScheduledTimeChange={setScheduledTime}
+              onKindChange={setKind}
+              onPriorityChange={setPriority}
+              onLocationChange={setLocation}
+              onParticipantsTextChange={setParticipantsText}
+              onTagsTextChange={setTagsText}
+              onChecklistTextChange={setChecklistText}
+              onCompletionCriteriaChange={setCompletionCriteria}
+              onSourceTextChange={setSourceText}
             />
           </section>
         )}
@@ -3068,11 +3443,13 @@ function ArrangementsPreview() {
         {!showForm && sortedArrangements.length > 0 ? (
           <section className={cn("space-y-2.5", showForm && "mt-3")}>
             <div className="flex items-center gap-2 px-1 text-xs leading-5 text-text-tertiary">
-              <span>待处理 {todoCount}</span>
-              <span>·</span>
-              <span>暂缓 {pausedCount}</span>
-              <span>·</span>
-              <span>完成 {completedCount}</span>
+              <span>{"\u5f85\u5904\u7406"} {todoCount}</span>
+              <span>/</span>
+              <span>{"\u5df2\u8fc7\u671f"} {expiredCount}</span>
+              <span>/</span>
+              <span>{"\u6682\u7f13"} {pausedCount}</span>
+              <span>/</span>
+              <span>{"\u5b8c\u6210"} {completedCount}</span>
             </div>
             {sortedArrangements.map((arrangement) => (
               <ArrangementCard
@@ -3143,6 +3520,14 @@ function ArrangementForm({
   title,
   content,
   scheduledTime,
+  kind,
+  priority,
+  location,
+  participantsText,
+  tagsText,
+  checklistText,
+  completionCriteria,
+  sourceText,
   canSubmit,
   submitLabel,
   showActions = true,
@@ -3151,11 +3536,27 @@ function ArrangementForm({
   onTitleChange,
   onContentChange,
   onScheduledTimeChange,
+  onKindChange,
+  onPriorityChange,
+  onLocationChange,
+  onParticipantsTextChange,
+  onTagsTextChange,
+  onChecklistTextChange,
+  onCompletionCriteriaChange,
+  onSourceTextChange,
 }: {
   formId?: string;
   title: string;
   content: string;
   scheduledTime: string;
+  kind: ArrangementKind;
+  priority: ArrangementPriority;
+  location: string;
+  participantsText: string;
+  tagsText: string;
+  checklistText: string;
+  completionCriteria: string;
+  sourceText: string;
   canSubmit: boolean;
   submitLabel: string;
   showActions?: boolean;
@@ -3164,6 +3565,14 @@ function ArrangementForm({
   onTitleChange: (value: string) => void;
   onContentChange: (value: string) => void;
   onScheduledTimeChange: (value: string) => void;
+  onKindChange: (value: ArrangementKind) => void;
+  onPriorityChange: (value: ArrangementPriority) => void;
+  onLocationChange: (value: string) => void;
+  onParticipantsTextChange: (value: string) => void;
+  onTagsTextChange: (value: string) => void;
+  onChecklistTextChange: (value: string) => void;
+  onCompletionCriteriaChange: (value: string) => void;
+  onSourceTextChange: (value: string) => void;
 }) {
   const [dateValue = "", timeValue = ""] = scheduledTime.split("T");
   const applyDateAndTime = (nextDate: string, nextTime: string) => {
@@ -3204,6 +3613,68 @@ function ArrangementForm({
           placeholder="补充要处理的事项、背景或下一步动作"
           rows={3}
           className="mt-1.5 block min-h-[92px] w-full resize-none rounded-[12px] border border-transparent bg-surface px-3 py-2.5 text-[15px] leading-6 text-text outline-none transition placeholder:text-input-placeholder focus:bg-input-bg-focus focus:shadow-[0_0_0_1px_var(--primary-ring),0_0_10px_var(--primary-ring)]"
+        />
+      </label>
+
+      <div className="grid grid-cols-2 gap-2">
+        <label className="block">
+          <span className="text-xs font-medium leading-4 text-text-muted">类型</span>
+          <select
+            value={kind}
+            onChange={(event) => onKindChange(event.target.value as ArrangementKind)}
+            className="mt-1.5 h-11 w-full rounded-[12px] border border-transparent bg-surface px-3 text-[15px] leading-5 text-text outline-none transition focus:bg-input-bg-focus focus:shadow-[0_0_0_1px_var(--primary-ring),0_0_10px_var(--primary-ring)]"
+          >
+            {arrangementKindOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="block">
+          <span className="text-xs font-medium leading-4 text-text-muted">重要性</span>
+          <select
+            value={priority}
+            onChange={(event) => onPriorityChange(event.target.value as ArrangementPriority)}
+            className="mt-1.5 h-11 w-full rounded-[12px] border border-transparent bg-surface px-3 text-[15px] leading-5 text-text outline-none transition focus:bg-input-bg-focus focus:shadow-[0_0_0_1px_var(--primary-ring),0_0_10px_var(--primary-ring)]"
+          >
+            {arrangementPriorityOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <label className="block">
+          <span className="text-xs font-medium leading-4 text-text-muted">地点</span>
+          <input
+            value={location}
+            onChange={(event) => onLocationChange(event.target.value)}
+            placeholder="如：医院、公司"
+            className="mt-1.5 h-11 w-full rounded-[12px] border border-transparent bg-surface px-3 text-[15px] leading-5 text-text outline-none transition placeholder:text-input-placeholder focus:bg-input-bg-focus focus:shadow-[0_0_0_1px_var(--primary-ring),0_0_10px_var(--primary-ring)]"
+          />
+        </label>
+        <label className="block">
+          <span className="text-xs font-medium leading-4 text-text-muted">相关人</span>
+          <input
+            value={participantsText}
+            onChange={(event) => onParticipantsTextChange(event.target.value)}
+            placeholder="用顿号或逗号分隔"
+            className="mt-1.5 h-11 w-full rounded-[12px] border border-transparent bg-surface px-3 text-[15px] leading-5 text-text outline-none transition placeholder:text-input-placeholder focus:bg-input-bg-focus focus:shadow-[0_0_0_1px_var(--primary-ring),0_0_10px_var(--primary-ring)]"
+          />
+        </label>
+      </div>
+
+      <label className="block">
+        <span className="text-xs font-medium leading-4 text-text-muted">标签</span>
+        <input
+          value={tagsText}
+          onChange={(event) => onTagsTextChange(event.target.value)}
+          placeholder="如：健康、工作、家庭"
+          className="mt-1.5 h-11 w-full rounded-[12px] border border-transparent bg-surface px-3 text-[15px] leading-5 text-text outline-none transition placeholder:text-input-placeholder focus:bg-input-bg-focus focus:shadow-[0_0_0_1px_var(--primary-ring),0_0_10px_var(--primary-ring)]"
         />
       </label>
 
@@ -3253,6 +3724,39 @@ function ArrangementForm({
             不设时间
           </button>
         </div>
+      </label>
+
+      <label className="block">
+        <span className="text-xs font-medium leading-4 text-text-muted">清单</span>
+        <textarea
+          value={checklistText}
+          onChange={(event) => onChecklistTextChange(event.target.value)}
+          placeholder="每行一项，例如：预约、准备材料、出门"
+          rows={3}
+          className="mt-1.5 block min-h-[88px] w-full resize-none rounded-[12px] border border-transparent bg-surface px-3 py-2.5 text-[15px] leading-6 text-text outline-none transition placeholder:text-input-placeholder focus:bg-input-bg-focus focus:shadow-[0_0_0_1px_var(--primary-ring),0_0_10px_var(--primary-ring)]"
+        />
+      </label>
+
+      <label className="block">
+        <span className="text-xs font-medium leading-4 text-text-muted">完成依据</span>
+        <textarea
+          value={completionCriteria}
+          onChange={(event) => onCompletionCriteriaChange(event.target.value)}
+          placeholder="写清怎样算完成，便于后续自动判断状态"
+          rows={2}
+          className="mt-1.5 block min-h-[72px] w-full resize-none rounded-[12px] border border-transparent bg-surface px-3 py-2.5 text-[15px] leading-6 text-text outline-none transition placeholder:text-input-placeholder focus:bg-input-bg-focus focus:shadow-[0_0_0_1px_var(--primary-ring),0_0_10px_var(--primary-ring)]"
+        />
+      </label>
+
+      <label className="block">
+        <span className="text-xs font-medium leading-4 text-text-muted">来源文本</span>
+        <textarea
+          value={sourceText}
+          onChange={(event) => onSourceTextChange(event.target.value)}
+          placeholder="手动创建可留空；后续文本识别会写入原文"
+          rows={2}
+          className="mt-1.5 block min-h-[72px] w-full resize-none rounded-[12px] border border-transparent bg-surface px-3 py-2.5 text-[15px] leading-6 text-text outline-none transition placeholder:text-input-placeholder focus:bg-input-bg-focus focus:shadow-[0_0_0_1px_var(--primary-ring),0_0_10px_var(--primary-ring)]"
+        />
       </label>
 
       {showActions && (
@@ -3315,6 +3819,24 @@ function ArrangementCard({
           <p className="mt-2 line-clamp-2 text-xs leading-5 text-text-muted">
             {arrangement.content}
           </p>
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            <span className="rounded-full bg-surface-subtle px-2 py-0.5 text-[11px] leading-4 text-text-tertiary">
+              {getArrangementKindLabel(arrangement.kind)}
+            </span>
+            <span
+              className={cn(
+                "rounded-full px-2 py-0.5 text-[11px] font-medium leading-4",
+                getArrangementPriorityPillClass(arrangement.priority)
+              )}
+            >
+              {getArrangementPriorityLabel(arrangement.priority)}
+            </span>
+            {arrangement.location && (
+              <span className="max-w-[112px] truncate rounded-full bg-surface-subtle px-2 py-0.5 text-[11px] leading-4 text-text-tertiary">
+                {arrangement.location}
+              </span>
+            )}
+          </div>
           <p className="mt-2 text-xs leading-4 text-text-tertiary">
             {formatArrangementDateTime(arrangement.scheduledAt)}
           </p>
@@ -3330,12 +3852,64 @@ function ArrangementCard({
   );
 }
 
+function ArrangementPageHeader({
+  title,
+  onBack,
+  rightAction,
+}: {
+  title: string;
+  onBack?: () => void;
+  rightAction?: React.ReactNode;
+}) {
+  return (
+    <header className="grid h-[50px] shrink-0 grid-cols-[72px_1fr_72px] items-center bg-bg px-2">
+      {onBack ? (
+        <button
+          type="button"
+          className="flex h-10 w-10 items-center justify-center rounded-full text-text transition hover:bg-hover-overlay active:scale-[0.96]"
+          onClick={onBack}
+          aria-label={"\u8fd4\u56de"}
+        >
+          <svg
+            className="h-5 w-5"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M19 12H5M12 19l-7-7 7-7" />
+          </svg>
+        </button>
+      ) : (
+        <div className="h-10 w-[72px]" aria-hidden="true" />
+      )}
+      <h1 className="min-w-0 truncate text-center text-[18px] font-medium leading-none text-text">
+        {title}
+      </h1>
+      <div className="flex h-10 w-[72px] items-center justify-end justify-self-end">
+        {rightAction}
+      </div>
+    </header>
+  );
+}
+
 function ArrangementDetailView({
   arrangement,
   isEditing,
   title,
   content,
   scheduledTime,
+  kind,
+  priority,
+  location,
+  participantsText,
+  tagsText,
+  checklistText,
+  completionCriteria,
+  sourceText,
   canSubmit,
   onBack,
   onEdit,
@@ -3344,6 +3918,14 @@ function ArrangementDetailView({
   onTitleChange,
   onContentChange,
   onScheduledTimeChange,
+  onKindChange,
+  onPriorityChange,
+  onLocationChange,
+  onParticipantsTextChange,
+  onTagsTextChange,
+  onChecklistTextChange,
+  onCompletionCriteriaChange,
+  onSourceTextChange,
   onComplete,
   onPause,
   onRestore,
@@ -3353,6 +3935,14 @@ function ArrangementDetailView({
   title: string;
   content: string;
   scheduledTime: string;
+  kind: ArrangementKind;
+  priority: ArrangementPriority;
+  location: string;
+  participantsText: string;
+  tagsText: string;
+  checklistText: string;
+  completionCriteria: string;
+  sourceText: string;
   canSubmit: boolean;
   onBack: () => void;
   onEdit: () => void;
@@ -3361,13 +3951,37 @@ function ArrangementDetailView({
   onTitleChange: (value: string) => void;
   onContentChange: (value: string) => void;
   onScheduledTimeChange: (value: string) => void;
+  onKindChange: (value: ArrangementKind) => void;
+  onPriorityChange: (value: ArrangementPriority) => void;
+  onLocationChange: (value: string) => void;
+  onParticipantsTextChange: (value: string) => void;
+  onTagsTextChange: (value: string) => void;
+  onChecklistTextChange: (value: string) => void;
+  onCompletionCriteriaChange: (value: string) => void;
+  onSourceTextChange: (value: string) => void;
   onComplete: () => void;
   onPause: () => void;
   onRestore: () => void;
 }) {
   return (
     <div className="flex h-full flex-col bg-bg">
-      <header className="flex h-[50px] shrink-0 items-center bg-bg px-2">
+      <ArrangementPageHeader
+        title={isEditing ? "\u7f16\u8f91\u5b89\u6392" : "\u5b89\u6392\u8be6\u60c5"}
+        onBack={isEditing ? onCancelEdit : onBack}
+        rightAction={
+          isEditing ? (
+            <button
+              type="submit"
+              form="arrangement-detail-edit-form"
+              disabled={!canSubmit}
+              className="flex h-10 min-w-10 items-center justify-center rounded-full px-3 text-sm font-semibold text-primary transition hover:bg-hover-overlay active:scale-[0.96] disabled:opacity-35"
+            >
+              {"\u4fdd\u5b58"}
+            </button>
+          ) : null
+        }
+      />
+      <header className="hidden">
         <button
           type="button"
           className="flex h-10 w-10 items-center justify-center rounded-full text-text transition hover:bg-hover-overlay active:scale-[0.96]"
@@ -3412,6 +4026,14 @@ function ArrangementDetailView({
               title={title}
               content={content}
               scheduledTime={scheduledTime}
+              kind={kind}
+              priority={priority}
+              location={location}
+              participantsText={participantsText}
+              tagsText={tagsText}
+              checklistText={checklistText}
+              completionCriteria={completionCriteria}
+              sourceText={sourceText}
               canSubmit={canSubmit}
               submitLabel="保存"
               showActions={false}
@@ -3420,6 +4042,14 @@ function ArrangementDetailView({
               onTitleChange={onTitleChange}
               onContentChange={onContentChange}
               onScheduledTimeChange={onScheduledTimeChange}
+              onKindChange={onKindChange}
+              onPriorityChange={onPriorityChange}
+              onLocationChange={onLocationChange}
+              onParticipantsTextChange={onParticipantsTextChange}
+              onTagsTextChange={onTagsTextChange}
+              onChecklistTextChange={onChecklistTextChange}
+              onCompletionCriteriaChange={onCompletionCriteriaChange}
+              onSourceTextChange={onSourceTextChange}
             />
           ) : (
             <>
@@ -3437,10 +4067,72 @@ function ArrangementDetailView({
               <p className="mt-4 whitespace-pre-wrap break-words text-[15px] leading-[1.7] text-text">
                 {arrangement.content}
               </p>
+              <div className="mt-4 flex flex-wrap gap-1.5">
+                <span className="rounded-full bg-surface-subtle px-2.5 py-1 text-xs leading-4 text-text-tertiary">
+                  {getArrangementKindLabel(arrangement.kind)}
+                </span>
+                <span
+                  className={cn(
+                    "rounded-full px-2.5 py-1 text-xs font-medium leading-4",
+                    getArrangementPriorityPillClass(arrangement.priority)
+                  )}
+                >
+                  {getArrangementPriorityLabel(arrangement.priority)}
+                </span>
+                {arrangement.tags.map((tag) => (
+                  <span
+                    key={tag}
+                    className="rounded-full bg-primary-soft px-2.5 py-1 text-xs leading-4 text-primary"
+                  >
+                    {tag}
+                  </span>
+                ))}
+              </div>
+              {arrangement.checklist.length > 0 && (
+                <section className="mt-4 rounded-[12px] bg-surface px-3 py-3">
+                  <h3 className="text-xs font-medium leading-4 text-text-tertiary">清单</h3>
+                  <div className="mt-2 space-y-2">
+                    {arrangement.checklist.map((item) => (
+                      <div key={item.uid} className="flex items-start gap-2 text-sm leading-5">
+                        <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-primary text-[10px] text-primary">
+                          {item.completed ? "✓" : ""}
+                        </span>
+                        <span className="min-w-0 flex-1 text-text">{item.text}</span>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
               <div className="mt-4 space-y-2 border-t border-border-light pt-3 text-sm leading-5">
                 <ArrangementDetailRow
                   label="安排时间"
                   value={formatArrangementDateTime(arrangement.scheduledAt)}
+                />
+                <ArrangementDetailRow
+                  label="地点"
+                  value={arrangement.location || "未填写"}
+                />
+                <ArrangementDetailRow
+                  label="相关人"
+                  value={
+                    arrangement.participants.length > 0
+                      ? formatArrangementTextList(arrangement.participants)
+                      : "未填写"
+                  }
+                />
+                <ArrangementDetailRow
+                  label="完成依据"
+                  value={arrangement.completionCriteria || "未填写"}
+                />
+                <ArrangementDetailRow
+                  label="来源"
+                  value={
+                    arrangement.sources
+                      .map((source) =>
+                        source.text ? `${source.label}\uff1a${source.text}` : source.label
+                      )
+                      .join("\uff1b")
+                  }
                 />
                 <ArrangementDetailRow
                   label="创建时间"
@@ -3525,6 +4217,16 @@ function ArrangementsPreviewLegacy() {
       uid: `arrangement-${now}-${Math.random().toString(36).slice(2, 8)}`,
       title: title.trim(),
       content: content.trim(),
+      kind: "task",
+      priority: "normal",
+      location: "",
+      participants: [],
+      tags: [],
+      checklist: [],
+      completionCriteria: "",
+      source: defaultArrangementSource,
+      sources: [defaultArrangementSource],
+      mergeGroupId: null,
       scheduledAt: scheduledTime ? new Date(scheduledTime).getTime() : null,
       status: "todo",
       completedAt: null,
