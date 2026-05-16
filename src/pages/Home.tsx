@@ -57,6 +57,7 @@ type TabItem = {
 
 const tabs: TabItem[] = [
   { key: "records" },
+  { key: "arrangements" },
   { key: "insight" },
   { key: "mine" },
 ];
@@ -64,6 +65,7 @@ const tabs: TabItem[] = [
 const aiConversationReadCountStorageKey = "arkme-demo.aiConversationReadCount";
 const browserNotificationPromptedStorageKey = "arkme-demo.browserNotificationPrompted";
 const createdSelfRecordsStorageKey = "arkme-demo.selfRecords";
+const arrangementsStorageKey = "arkme-demo.arrangements";
 const searchHistoryStorageKey = "arkme-demo.searchHistory";
 const aiConversationTotalCount = aiConversationLogEntries.length;
 const maxSearchHistoryCount = 4;
@@ -97,6 +99,20 @@ type TestConversationSummary = {
 type TestConversationRecord = RecordItem & {
   sender: TestMessageSender;
   identityId: string;
+};
+
+type ArrangementStatus = "todo" | "completed" | "paused";
+
+type ArrangementItem = {
+  uid: string;
+  title: string;
+  content: string;
+  scheduledAt: number | null;
+  status: ArrangementStatus;
+  completedAt: number | null;
+  pausedAt: number | null;
+  createAt: number;
+  updateAt: number;
 };
 
 type HomeMessagePreview = {
@@ -234,6 +250,154 @@ function persistCreatedSelfRecords(records: RecordItem[]) {
   } catch {
     // Storage can be unavailable in private modes; keep the in-memory record.
   }
+}
+
+function normalizeStoredArrangement(value: unknown): ArrangementItem | null {
+  if (!value || typeof value !== "object") return null;
+
+  const arrangement = value as Partial<ArrangementItem>;
+  if (
+    typeof arrangement.uid !== "string" ||
+    typeof arrangement.title !== "string" ||
+    typeof arrangement.content !== "string" ||
+    typeof arrangement.createAt !== "number" ||
+    typeof arrangement.updateAt !== "number" ||
+    !Number.isFinite(arrangement.createAt) ||
+    !Number.isFinite(arrangement.updateAt)
+  ) {
+    return null;
+  }
+
+  const scheduledAt =
+    typeof arrangement.scheduledAt === "number" && Number.isFinite(arrangement.scheduledAt)
+      ? arrangement.scheduledAt
+      : null;
+  const status: ArrangementStatus =
+    arrangement.status === "completed" || arrangement.status === "paused"
+      ? arrangement.status
+      : "todo";
+  const completedAt =
+    typeof arrangement.completedAt === "number" && Number.isFinite(arrangement.completedAt)
+      ? arrangement.completedAt
+      : null;
+  const pausedAt =
+    typeof arrangement.pausedAt === "number" && Number.isFinite(arrangement.pausedAt)
+      ? arrangement.pausedAt
+      : null;
+
+  return {
+    uid: arrangement.uid,
+    title: arrangement.title,
+    content: arrangement.content,
+    scheduledAt,
+    status,
+    completedAt,
+    pausedAt,
+    createAt: arrangement.createAt,
+    updateAt: arrangement.updateAt,
+  };
+}
+
+function getInitialArrangements() {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  try {
+    const storedValue = window.localStorage.getItem(arrangementsStorageKey);
+    if (!storedValue) return [];
+
+    const parsedValue = JSON.parse(storedValue);
+    if (!Array.isArray(parsedValue)) return [];
+
+    return parsedValue
+      .map(normalizeStoredArrangement)
+      .filter((arrangement): arrangement is ArrangementItem => Boolean(arrangement));
+  } catch {
+    return [];
+  }
+}
+
+function persistArrangements(arrangements: ArrangementItem[]) {
+  if (typeof window === "undefined") return;
+
+  try {
+    window.localStorage.setItem(arrangementsStorageKey, JSON.stringify(arrangements));
+  } catch {
+    // Keep the visible in-memory arrangements if storage is unavailable.
+  }
+}
+
+function formatArrangementDateTime(timestamp: number | null) {
+  if (!timestamp) return "未设置时间";
+
+  const date = new Date(timestamp);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${year}-${month}-${day} ${hours}:${minutes}`;
+}
+
+function toDateTimeLocalValue(timestamp: number | null) {
+  if (!timestamp) return "";
+
+  const date = new Date(timestamp);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
+function parseArrangementScheduledTime(value: string) {
+  if (!value) return null;
+
+  const parsedValue = new Date(value).getTime();
+  return Number.isFinite(parsedValue) ? parsedValue : null;
+}
+
+function getArrangementStatusLabel(status: ArrangementStatus) {
+  if (status === "completed") return "已完成";
+  if (status === "paused") return "已暂缓";
+  return "待处理";
+}
+
+function getNextFriday() {
+  const date = new Date();
+  const day = date.getDay();
+  const daysUntilFriday = (5 - day + 7) % 7 || 7;
+  date.setDate(date.getDate() + daysUntilFriday);
+  date.setHours(18, 0, 0, 0);
+  return date.getTime();
+}
+
+function getArrangementStatusCardClass(status: ArrangementStatus) {
+  if (status === "completed") {
+    return "border-emerald-200 bg-emerald-50/80 dark:border-emerald-900/60 dark:bg-emerald-950/20";
+  }
+  if (status === "paused") {
+    return "border-amber-300/70 bg-amber-50/80 dark:border-amber-900/60 dark:bg-amber-950/20";
+  }
+  return "border-primary/35 bg-[var(--record-card-bg)]";
+}
+
+function getArrangementStatusDotClass(status: ArrangementStatus) {
+  if (status === "completed") return "bg-emerald-500";
+  if (status === "paused") return "bg-amber-500";
+  return "bg-primary";
+}
+
+function getArrangementStatusPillClass(status: ArrangementStatus) {
+  if (status === "completed") {
+    return "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/70 dark:text-emerald-300";
+  }
+  if (status === "paused") {
+    return "bg-amber-100 text-amber-700 dark:bg-amber-950/70 dark:text-amber-300";
+  }
+  return "bg-primary-soft text-primary";
 }
 
 function makeRecordReference(record: RecordItem): RecordReference {
@@ -1168,6 +1332,10 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           onOpenAbout={() => setSettingsView("about")}
         />
       );
+    }
+
+    if (currentPage === "arrangements") {
+      return <ArrangementsPreview />;
     }
 
     if (currentPage === "insight") {
@@ -2706,6 +2874,853 @@ function MobileBottomNavigation({
   );
 }
 
+function ArrangementsPreview() {
+  const [arrangements, setArrangements] = React.useState(getInitialArrangements);
+  const [showForm, setShowForm] = React.useState(false);
+  const [activeArrangementId, setActiveArrangementId] = React.useState<string | null>(null);
+  const [editingArrangementId, setEditingArrangementId] = React.useState<string | null>(null);
+  const [title, setTitle] = React.useState("");
+  const [content, setContent] = React.useState("");
+  const [scheduledTime, setScheduledTime] = React.useState("");
+  const [saveHint, setSaveHint] = React.useState("");
+  const activeArrangement =
+    arrangements.find((arrangement) => arrangement.uid === activeArrangementId) ?? null;
+  const editingArrangement =
+    arrangements.find((arrangement) => arrangement.uid === editingArrangementId) ?? null;
+  const canSubmit = title.trim().length > 0 && content.trim().length > 0;
+  const todoCount = arrangements.filter((item) => item.status === "todo").length;
+  const pausedCount = arrangements.filter((item) => item.status === "paused").length;
+  const completedCount = arrangements.filter((item) => item.status === "completed").length;
+  const sortedArrangements = React.useMemo(
+    () =>
+      [...arrangements].sort((a, b) => {
+        const statusRank: Record<ArrangementStatus, number> = {
+          todo: 0,
+          paused: 1,
+          completed: 2,
+        };
+        return statusRank[a.status] - statusRank[b.status] || b.updateAt - a.updateAt;
+      }),
+    [arrangements]
+  );
+
+  const resetForm = () => {
+    setTitle("");
+    setContent("");
+    setScheduledTime("");
+    setEditingArrangementId(null);
+  };
+
+  const persistNextArrangements = (nextArrangements: ArrangementItem[]) => {
+    setArrangements(nextArrangements);
+    persistArrangements(nextArrangements);
+  };
+
+  const openCreateForm = () => {
+    resetForm();
+    setShowForm(true);
+    setSaveHint("");
+  };
+
+  const openEditForm = (arrangement: ArrangementItem) => {
+    setTitle(arrangement.title);
+    setContent(arrangement.content);
+    setScheduledTime(toDateTimeLocalValue(arrangement.scheduledAt));
+    setEditingArrangementId(arrangement.uid);
+    setShowForm(true);
+    setSaveHint("");
+  };
+
+  const updateArrangement = (
+    uid: string,
+    updater: (arrangement: ArrangementItem) => ArrangementItem
+  ) => {
+    persistNextArrangements(
+      arrangements.map((arrangement) =>
+        arrangement.uid === uid ? updater(arrangement) : arrangement
+      )
+    );
+  };
+
+  const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!canSubmit) return;
+
+    const now = Date.now();
+    const scheduledAt = parseArrangementScheduledTime(scheduledTime);
+
+    if (editingArrangement) {
+      updateArrangement(editingArrangement.uid, (arrangement) => ({
+        ...arrangement,
+        title: title.trim(),
+        content: content.trim(),
+        scheduledAt,
+        updateAt: now,
+      }));
+      setSaveHint("安排已更新");
+    } else {
+      const nextArrangement: ArrangementItem = {
+        uid: `arrangement-${now}-${Math.random().toString(36).slice(2, 8)}`,
+        title: title.trim(),
+        content: content.trim(),
+        scheduledAt,
+        status: "todo",
+        completedAt: null,
+        pausedAt: null,
+        createAt: now,
+        updateAt: now,
+      };
+      persistNextArrangements([nextArrangement, ...arrangements]);
+      setSaveHint("已保存到本机");
+    }
+
+    resetForm();
+    setShowForm(false);
+  };
+
+  const changeStatus = (uid: string, status: ArrangementStatus) => {
+    const now = Date.now();
+    updateArrangement(uid, (arrangement) => ({
+      ...arrangement,
+      status,
+      completedAt: status === "completed" ? now : null,
+      pausedAt: status === "paused" ? now : null,
+      updateAt: now,
+    }));
+  };
+
+  if (activeArrangement) {
+    return (
+      <ArrangementDetailView
+        arrangement={activeArrangement}
+        isEditing={showForm && editingArrangementId === activeArrangement.uid}
+        title={title}
+        content={content}
+        scheduledTime={scheduledTime}
+        canSubmit={canSubmit}
+        onBack={() => {
+          setActiveArrangementId(null);
+          setShowForm(false);
+          resetForm();
+        }}
+        onEdit={() => openEditForm(activeArrangement)}
+        onSubmit={handleSubmit}
+        onCancelEdit={() => {
+          setShowForm(false);
+          resetForm();
+        }}
+        onTitleChange={setTitle}
+        onContentChange={setContent}
+        onScheduledTimeChange={setScheduledTime}
+        onComplete={() => changeStatus(activeArrangement.uid, "completed")}
+        onPause={() => changeStatus(activeArrangement.uid, "paused")}
+        onRestore={() => changeStatus(activeArrangement.uid, "todo")}
+      />
+    );
+  }
+
+  return (
+    <div className="flex h-full flex-col bg-bg">
+      <header className="flex h-14 shrink-0 items-center justify-between bg-bg px-4">
+        <div className="min-w-0">
+          <h1 className="truncate text-lg font-semibold text-text">安排</h1>
+          <p className="mt-0.5 truncate text-xs leading-4 text-text-muted">
+            把接下来要落地的事情放在这里
+          </p>
+        </div>
+      </header>
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-24 pt-2">
+        {showForm && (
+          <section className="rounded-[12px] border border-[var(--record-card-border)] bg-[var(--record-card-bg)] px-3 py-3 shadow-[var(--mine-card-shadow)]">
+            <div className="flex items-center justify-between">
+              <div className="min-w-0">
+                <p className="text-[15px] font-semibold leading-5 text-text">添加安排</p>
+                <p className="mt-1 truncate text-xs leading-4 text-text-tertiary">
+                  填写标题、内容和时间
+                </p>
+              </div>
+            </div>
+            <ArrangementForm
+              title={title}
+              content={content}
+              scheduledTime={scheduledTime}
+              canSubmit={canSubmit}
+              submitLabel="保存"
+              onSubmit={handleSubmit}
+              onCancel={() => {
+                setShowForm(false);
+                resetForm();
+              }}
+              onTitleChange={setTitle}
+              onContentChange={setContent}
+              onScheduledTimeChange={setScheduledTime}
+            />
+          </section>
+        )}
+
+        {saveHint && !showForm && (
+          <p className="mb-3 rounded-[10px] bg-primary-soft px-3 py-2 text-xs leading-4 text-primary">
+            {saveHint}
+          </p>
+        )}
+
+        {!showForm && sortedArrangements.length > 0 ? (
+          <section className={cn("space-y-2.5", showForm && "mt-3")}>
+            <div className="flex items-center gap-2 px-1 text-xs leading-5 text-text-tertiary">
+              <span>待处理 {todoCount}</span>
+              <span>·</span>
+              <span>暂缓 {pausedCount}</span>
+              <span>·</span>
+              <span>完成 {completedCount}</span>
+            </div>
+            {sortedArrangements.map((arrangement) => (
+              <ArrangementCard
+                key={arrangement.uid}
+                arrangement={arrangement}
+                onOpen={() => setActiveArrangementId(arrangement.uid)}
+              />
+            ))}
+          </section>
+        ) : !showForm ? (
+          <section className={cn("flex min-h-[256px] items-center justify-center rounded-[12px] border border-dashed border-border bg-surface px-7 text-center", showForm && "mt-3")}>
+            <div>
+              <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-primary-soft text-primary">
+                <svg
+                  width="24"
+                  height="24"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M8 7h8M8 12h5M8 17h4" />
+                  <path d="M6 3h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" />
+                </svg>
+              </div>
+              <h2 className="mt-4 text-[15px] font-semibold leading-5 text-text">
+                还没有安排
+              </h2>
+              <p className="mt-2 text-xs leading-5 text-text-muted">
+                点击上方的新建安排，先录入标题、内容和时间。
+              </p>
+            </div>
+          </section>
+        ) : null}
+      </div>
+      {!showForm && (
+        <div className="shrink-0 bg-bg px-3 pb-4 pt-2">
+          <button
+            type="button"
+            className="flex h-12 w-full items-center justify-center rounded-[12px] bg-primary text-[15px] font-semibold text-on-primary shadow-[var(--mine-card-shadow)] transition active:scale-[0.98]"
+            onClick={openCreateForm}
+          >
+            <svg
+              className="mr-2 h-5 w-5"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+            添加安排
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ArrangementForm({
+  formId,
+  title,
+  content,
+  scheduledTime,
+  canSubmit,
+  submitLabel,
+  showActions = true,
+  onSubmit,
+  onCancel,
+  onTitleChange,
+  onContentChange,
+  onScheduledTimeChange,
+}: {
+  formId?: string;
+  title: string;
+  content: string;
+  scheduledTime: string;
+  canSubmit: boolean;
+  submitLabel: string;
+  showActions?: boolean;
+  onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
+  onCancel: () => void;
+  onTitleChange: (value: string) => void;
+  onContentChange: (value: string) => void;
+  onScheduledTimeChange: (value: string) => void;
+}) {
+  const [dateValue = "", timeValue = ""] = scheduledTime.split("T");
+  const applyDateAndTime = (nextDate: string, nextTime: string) => {
+    if (!nextDate) {
+      onScheduledTimeChange("");
+      return;
+    }
+
+    onScheduledTimeChange(`${nextDate}T${nextTime || "09:00"}`);
+  };
+  const applyQuickTime = (timestamp: number) => {
+    onScheduledTimeChange(toDateTimeLocalValue(timestamp));
+  };
+  const now = new Date();
+  const todayEvening = new Date(now);
+  todayEvening.setHours(18, 0, 0, 0);
+  const tomorrowMorning = new Date(now);
+  tomorrowMorning.setDate(tomorrowMorning.getDate() + 1);
+  tomorrowMorning.setHours(9, 0, 0, 0);
+
+  return (
+    <form id={formId} className="mt-4 space-y-3" onSubmit={onSubmit}>
+      <label className="block">
+        <span className="text-xs font-medium leading-4 text-text-muted">标题</span>
+        <input
+          value={title}
+          onChange={(event) => onTitleChange(event.target.value)}
+          placeholder="例如：确认周会材料"
+          className="mt-1.5 h-11 w-full rounded-[12px] border border-transparent bg-surface px-3 text-[15px] leading-5 text-text outline-none transition placeholder:text-input-placeholder focus:bg-input-bg-focus focus:shadow-[0_0_0_1px_var(--primary-ring),0_0_10px_var(--primary-ring)]"
+        />
+      </label>
+
+      <label className="block">
+        <span className="text-xs font-medium leading-4 text-text-muted">内容</span>
+        <textarea
+          value={content}
+          onChange={(event) => onContentChange(event.target.value)}
+          placeholder="补充要处理的事项、背景或下一步动作"
+          rows={3}
+          className="mt-1.5 block min-h-[92px] w-full resize-none rounded-[12px] border border-transparent bg-surface px-3 py-2.5 text-[15px] leading-6 text-text outline-none transition placeholder:text-input-placeholder focus:bg-input-bg-focus focus:shadow-[0_0_0_1px_var(--primary-ring),0_0_10px_var(--primary-ring)]"
+        />
+      </label>
+
+      <label className="block">
+        <span className="text-xs font-medium leading-4 text-text-muted">时间</span>
+        <div className="mt-1.5 grid grid-cols-[1.35fr_1fr] gap-2">
+          <input
+            type="date"
+            value={dateValue}
+            onChange={(event) => applyDateAndTime(event.target.value, timeValue)}
+            className="h-11 min-w-0 rounded-[12px] border border-transparent bg-surface px-3 text-[15px] leading-5 text-text outline-none transition placeholder:text-input-placeholder focus:bg-input-bg-focus focus:shadow-[0_0_0_1px_var(--primary-ring),0_0_10px_var(--primary-ring)]"
+          />
+          <input
+            type="time"
+            value={timeValue}
+            onChange={(event) => applyDateAndTime(dateValue, event.target.value)}
+            className="h-11 min-w-0 rounded-[12px] border border-transparent bg-surface px-3 text-[15px] leading-5 text-text outline-none transition placeholder:text-input-placeholder focus:bg-input-bg-focus focus:shadow-[0_0_0_1px_var(--primary-ring),0_0_10px_var(--primary-ring)]"
+          />
+        </div>
+        <div className="mt-2 grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            className="h-9 rounded-[10px] bg-surface-subtle px-2 text-xs font-medium text-text transition active:scale-[0.97]"
+            onClick={() => applyQuickTime(todayEvening.getTime())}
+          >
+            今天 18:00
+          </button>
+          <button
+            type="button"
+            className="h-9 rounded-[10px] bg-surface-subtle px-2 text-xs font-medium text-text transition active:scale-[0.97]"
+            onClick={() => applyQuickTime(tomorrowMorning.getTime())}
+          >
+            明天 09:00
+          </button>
+          <button
+            type="button"
+            className="h-9 rounded-[10px] bg-surface-subtle px-2 text-xs font-medium text-text transition active:scale-[0.97]"
+            onClick={() => applyQuickTime(getNextFriday())}
+          >
+            周五 18:00
+          </button>
+          <button
+            type="button"
+            className="h-9 rounded-[10px] bg-surface-subtle px-2 text-xs font-medium text-text-tertiary transition active:scale-[0.97]"
+            onClick={() => onScheduledTimeChange("")}
+          >
+            不设时间
+          </button>
+        </div>
+      </label>
+
+      {showActions && (
+        <div className="flex items-center justify-end gap-2 pt-1">
+        <button
+          type="button"
+          className="h-10 rounded-[10px] px-3 text-sm font-medium text-text-tertiary transition active:scale-[0.97]"
+          onClick={onCancel}
+        >
+          取消
+        </button>
+        <button
+          type="submit"
+          disabled={!canSubmit}
+          className="h-10 rounded-[10px] bg-primary px-4 text-sm font-semibold text-on-primary transition active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-35"
+        >
+          {submitLabel}
+        </button>
+      </div>
+      )}
+    </form>
+  );
+}
+
+function ArrangementCard({
+  arrangement,
+  onOpen,
+}: {
+  arrangement: ArrangementItem;
+  onOpen: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={cn(
+        "w-full rounded-[12px] border px-3 py-3 text-left shadow-[var(--mine-card-shadow)] transition active:scale-[0.99]",
+        getArrangementStatusCardClass(arrangement.status),
+        arrangement.status === "completed" && "opacity-70"
+      )}
+      onClick={onOpen}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span
+              className={cn(
+                "h-2.5 w-2.5 shrink-0 rounded-full",
+                getArrangementStatusDotClass(arrangement.status)
+              )}
+            />
+            <h2
+              className={cn(
+                "min-w-0 truncate text-[15px] font-semibold leading-5 text-text",
+                arrangement.status === "completed" && "line-through decoration-text-tertiary"
+              )}
+            >
+              {arrangement.title}
+            </h2>
+          </div>
+          <p className="mt-2 line-clamp-2 text-xs leading-5 text-text-muted">
+            {arrangement.content}
+          </p>
+          <p className="mt-2 text-xs leading-4 text-text-tertiary">
+            {formatArrangementDateTime(arrangement.scheduledAt)}
+          </p>
+        </div>
+        <span className={cn(
+          "shrink-0 rounded-full px-2.5 py-1 text-xs font-medium leading-4",
+          getArrangementStatusPillClass(arrangement.status)
+        )}>
+          {getArrangementStatusLabel(arrangement.status)}
+        </span>
+      </div>
+    </button>
+  );
+}
+
+function ArrangementDetailView({
+  arrangement,
+  isEditing,
+  title,
+  content,
+  scheduledTime,
+  canSubmit,
+  onBack,
+  onEdit,
+  onSubmit,
+  onCancelEdit,
+  onTitleChange,
+  onContentChange,
+  onScheduledTimeChange,
+  onComplete,
+  onPause,
+  onRestore,
+}: {
+  arrangement: ArrangementItem;
+  isEditing: boolean;
+  title: string;
+  content: string;
+  scheduledTime: string;
+  canSubmit: boolean;
+  onBack: () => void;
+  onEdit: () => void;
+  onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
+  onCancelEdit: () => void;
+  onTitleChange: (value: string) => void;
+  onContentChange: (value: string) => void;
+  onScheduledTimeChange: (value: string) => void;
+  onComplete: () => void;
+  onPause: () => void;
+  onRestore: () => void;
+}) {
+  return (
+    <div className="flex h-full flex-col bg-bg">
+      <header className="flex h-[50px] shrink-0 items-center bg-bg px-2">
+        <button
+          type="button"
+          className="flex h-10 w-10 items-center justify-center rounded-full text-text transition hover:bg-hover-overlay active:scale-[0.96]"
+          onClick={isEditing ? onCancelEdit : onBack}
+          aria-label={isEditing ? "取消编辑" : "返回"}
+        >
+          <svg
+            className="h-5 w-5"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M19 12H5M12 19l-7-7 7-7" />
+          </svg>
+        </button>
+        <h1 className="min-w-0 flex-1 truncate text-center text-[18px] font-medium leading-none text-text">
+          安排详情
+        </h1>
+        {isEditing ? (
+          <button
+            type="submit"
+            form="arrangement-detail-edit-form"
+            disabled={!canSubmit}
+            className="flex h-10 min-w-10 items-center justify-center rounded-full px-3 text-sm font-semibold text-primary transition hover:bg-hover-overlay active:scale-[0.96] disabled:opacity-35"
+          >
+            保存
+          </button>
+        ) : (
+          <div className="h-10 w-10" aria-hidden="true" />
+        )}
+      </header>
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-5 pt-2">
+        <article className="rounded-[12px] border border-[var(--record-card-border)] bg-[var(--record-card-bg)] px-3 py-4 shadow-[var(--mine-card-shadow)]">
+          {isEditing ? (
+            <ArrangementForm
+              formId="arrangement-detail-edit-form"
+              title={title}
+              content={content}
+              scheduledTime={scheduledTime}
+              canSubmit={canSubmit}
+              submitLabel="保存"
+              showActions={false}
+              onSubmit={onSubmit}
+              onCancel={onCancelEdit}
+              onTitleChange={onTitleChange}
+              onContentChange={onContentChange}
+              onScheduledTimeChange={onScheduledTimeChange}
+            />
+          ) : (
+            <>
+              <div className="flex items-start justify-between gap-3">
+                <h2 className="min-w-0 flex-1 text-[18px] font-semibold leading-6 text-text">
+                  {arrangement.title}
+                </h2>
+                <span className={cn(
+                  "shrink-0 rounded-full px-2.5 py-1 text-xs font-medium leading-4",
+                  getArrangementStatusPillClass(arrangement.status)
+                )}>
+                  {getArrangementStatusLabel(arrangement.status)}
+                </span>
+              </div>
+              <p className="mt-4 whitespace-pre-wrap break-words text-[15px] leading-[1.7] text-text">
+                {arrangement.content}
+              </p>
+              <div className="mt-4 space-y-2 border-t border-border-light pt-3 text-sm leading-5">
+                <ArrangementDetailRow
+                  label="安排时间"
+                  value={formatArrangementDateTime(arrangement.scheduledAt)}
+                />
+                <ArrangementDetailRow
+                  label="创建时间"
+                  value={formatArrangementDateTime(arrangement.createAt)}
+                />
+                <ArrangementDetailRow
+                  label="更新时间"
+                  value={formatArrangementDateTime(arrangement.updateAt)}
+                />
+                {arrangement.completedAt && (
+                  <ArrangementDetailRow
+                    label="完成时间"
+                    value={formatArrangementDateTime(arrangement.completedAt)}
+                  />
+                )}
+                {arrangement.pausedAt && (
+                  <ArrangementDetailRow
+                    label="暂缓时间"
+                    value={formatArrangementDateTime(arrangement.pausedAt)}
+                  />
+                )}
+              </div>
+            </>
+          )}
+        </article>
+
+        {!isEditing && (
+          <section className="mt-3 grid grid-cols-3 gap-2">
+            <button
+              type="button"
+              className="h-11 rounded-[10px] bg-primary text-sm font-semibold text-on-primary transition active:scale-[0.97] disabled:opacity-35"
+              onClick={arrangement.status === "completed" ? onRestore : onComplete}
+            >
+              {arrangement.status === "completed" ? "恢复" : "完成"}
+            </button>
+            <button
+              type="button"
+              className="h-11 rounded-[10px] bg-surface text-sm font-medium text-text transition active:scale-[0.97] disabled:opacity-35"
+              onClick={arrangement.status === "paused" ? onRestore : onPause}
+            >
+              {arrangement.status === "paused" ? "恢复" : "暂缓"}
+            </button>
+            <button
+              type="button"
+              className="h-11 rounded-[10px] bg-surface text-sm font-medium text-text transition active:scale-[0.97]"
+              onClick={onEdit}
+            >
+              编辑
+            </button>
+          </section>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ArrangementDetailRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-start gap-3">
+      <span className="w-[72px] shrink-0 text-text-tertiary">{label}</span>
+      <span className="min-w-0 flex-1 text-text">{value}</span>
+    </div>
+  );
+}
+
+function ArrangementsPreviewLegacy() {
+  const [arrangements, setArrangements] = React.useState(getInitialArrangements);
+  const [showForm, setShowForm] = React.useState(false);
+  const [title, setTitle] = React.useState("");
+  const [content, setContent] = React.useState("");
+  const [scheduledTime, setScheduledTime] = React.useState("");
+  const [saveHint, setSaveHint] = React.useState("");
+  const countLabel = `${arrangements.length} 条`;
+  const canSubmit = title.trim().length > 0 && content.trim().length > 0;
+
+  const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!canSubmit) return;
+
+    const now = Date.now();
+    const nextArrangement: ArrangementItem = {
+      uid: `arrangement-${now}-${Math.random().toString(36).slice(2, 8)}`,
+      title: title.trim(),
+      content: content.trim(),
+      scheduledAt: scheduledTime ? new Date(scheduledTime).getTime() : null,
+      status: "todo",
+      completedAt: null,
+      pausedAt: null,
+      createAt: now,
+      updateAt: now,
+    };
+    const nextArrangements = [nextArrangement, ...arrangements];
+
+    setArrangements(nextArrangements);
+    persistArrangements(nextArrangements);
+    setTitle("");
+    setContent("");
+    setScheduledTime("");
+    setShowForm(false);
+    setSaveHint("已保存到本机");
+  };
+
+  return (
+    <div className="flex h-full flex-col bg-bg">
+      <header className="flex h-14 shrink-0 items-center justify-between bg-bg px-4">
+        <div className="min-w-0">
+          <h1 className="truncate text-lg font-semibold text-text">安排</h1>
+          <p className="mt-0.5 truncate text-xs leading-4 text-text-muted">
+            把接下来要落地的事情放在这里
+          </p>
+        </div>
+        <button
+          type="button"
+          className="ml-3 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary text-on-primary shadow-[var(--mine-card-shadow)] transition active:scale-[0.94]"
+          onClick={() => {
+            setShowForm(true);
+            setSaveHint("");
+          }}
+          aria-label="新建安排"
+        >
+          <svg
+            width="19"
+            height="19"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+        </button>
+      </header>
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-5 pt-2">
+        <section className="rounded-[12px] border border-[var(--record-card-border)] bg-[var(--record-card-bg)] px-3 py-3 shadow-[var(--mine-card-shadow)]">
+          <div className="flex items-center justify-between">
+            <div className="min-w-0">
+              <p className="text-[15px] font-semibold leading-5 text-text">待安排</p>
+              <p className="mt-1 truncate text-xs leading-4 text-text-tertiary">
+                先从一条手动安排开始
+              </p>
+            </div>
+            <span className="ml-3 shrink-0 rounded-full bg-primary-soft px-2.5 py-1 text-xs font-medium leading-4 text-primary">
+              {countLabel}
+            </span>
+          </div>
+
+          {showForm ? (
+            <form className="mt-4 space-y-3" onSubmit={handleSubmit}>
+              <label className="block">
+                <span className="text-xs font-medium leading-4 text-text-muted">标题</span>
+                <input
+                  value={title}
+                  onChange={(event) => setTitle(event.target.value)}
+                  placeholder="例如：确认周会材料"
+                  className="mt-1.5 h-11 w-full rounded-[12px] border border-transparent bg-surface px-3 text-[15px] leading-5 text-text outline-none transition placeholder:text-input-placeholder focus:bg-input-bg-focus focus:shadow-[0_0_0_1px_var(--primary-ring),0_0_10px_var(--primary-ring)]"
+                />
+              </label>
+
+              <label className="block">
+                <span className="text-xs font-medium leading-4 text-text-muted">内容</span>
+                <textarea
+                  value={content}
+                  onChange={(event) => setContent(event.target.value)}
+                  placeholder="补充要处理的事项、背景或下一步动作"
+                  rows={3}
+                  className="mt-1.5 block min-h-[92px] w-full resize-none rounded-[12px] border border-transparent bg-surface px-3 py-2.5 text-[15px] leading-6 text-text outline-none transition placeholder:text-input-placeholder focus:bg-input-bg-focus focus:shadow-[0_0_0_1px_var(--primary-ring),0_0_10px_var(--primary-ring)]"
+                />
+              </label>
+
+              <label className="block">
+                <span className="text-xs font-medium leading-4 text-text-muted">时间</span>
+                <input
+                  type="datetime-local"
+                  value={scheduledTime}
+                  onChange={(event) => setScheduledTime(event.target.value)}
+                  className="mt-1.5 h-11 w-full rounded-[12px] border border-transparent bg-surface px-3 text-[15px] leading-5 text-text outline-none transition placeholder:text-input-placeholder focus:bg-input-bg-focus focus:shadow-[0_0_0_1px_var(--primary-ring),0_0_10px_var(--primary-ring)]"
+                />
+              </label>
+
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  className="h-10 rounded-[10px] px-3 text-sm font-medium text-text-tertiary transition active:scale-[0.97]"
+                  onClick={() => {
+                    setShowForm(false);
+                    setTitle("");
+                    setContent("");
+                    setScheduledTime("");
+                  }}
+                >
+                  取消
+                </button>
+                <button
+                  type="submit"
+                  disabled={!canSubmit}
+                  className="h-10 rounded-[10px] bg-primary px-4 text-sm font-semibold text-on-primary transition active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-35"
+                >
+                  保存
+                </button>
+              </div>
+            </form>
+          ) : (
+            <button
+              type="button"
+              className="mt-4 flex min-h-[48px] w-full items-center rounded-[10px] bg-surface-subtle px-3 text-left transition active:scale-[0.99]"
+              onClick={() => {
+                setShowForm(true);
+                setSaveHint("");
+              }}
+            >
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary-soft text-primary">
+                <svg
+                  width="15"
+                  height="15"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+              </span>
+              <span className="ml-2 min-w-0 flex-1">
+                <span className="block text-sm font-medium leading-5 text-text">新建安排</span>
+                <span className="block truncate text-xs leading-4 text-text-tertiary">
+                  标题、内容和时间会保存到本机
+                </span>
+              </span>
+            </button>
+          )}
+
+          {saveHint && (
+            <p className="mt-3 rounded-[10px] bg-primary-soft px-3 py-2 text-xs leading-4 text-primary">
+              {saveHint}，后续步骤会完善列表卡片和详情页。
+            </p>
+          )}
+        </section>
+
+        <section className="mt-3 flex min-h-[256px] items-center justify-center rounded-[12px] border border-dashed border-border bg-surface px-7 text-center">
+          <div>
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-primary-soft text-primary">
+              <svg
+                width="24"
+                height="24"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M8 7h8M8 12h5M8 17h4" />
+                <path d="M6 3h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" />
+              </svg>
+            </div>
+            <h2 className="mt-4 text-[15px] font-semibold leading-5 text-text">
+              {arrangements.length > 0 ? "安排已保存" : "还没有安排"}
+            </h2>
+            <p className="mt-2 text-xs leading-5 text-text-muted">
+              {arrangements.length > 0
+                ? "当前已完成手动创建和本地保存。列表卡片、详情页会在下一步接入。"
+                : "点击上方的新建安排，先录入标题、内容和时间。"}
+            </p>
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+void ArrangementsPreviewLegacy;
+
 function InsightPreview() {
   const { t } = usePreferences();
 
@@ -3430,6 +4445,7 @@ function ThemePreview({ mode }: { mode: ResolvedTheme }) {
 
 function getTabLabel(page: PageType, t: ReturnType<typeof usePreferences>["t"]) {
   if (page === "records") return t("tabs.records");
+  if (page === "arrangements") return "安排";
   if (page === "insight") return t("tabs.insight");
   return t("tabs.mine");
 }
