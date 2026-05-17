@@ -3,13 +3,24 @@ import { cn } from "@/lib/utils";
 import { usePreferences } from "@/settings/preferences";
 
 type ChatInputProps = {
-  onSubmit: (content: string) => void;
+  onSubmit: (content: string) => void | Promise<void>;
   onVoiceSubmit: () => void;
+  idleLabel?: string;
+  textPlaceholder?: string;
+  isSubmitting?: boolean;
+  submittingLabel?: string;
 };
 
 const LONG_PRESS_MS = 500;
 
-export default function ChatInput({ onSubmit, onVoiceSubmit }: ChatInputProps) {
+export default function ChatInput({
+  onSubmit,
+  onVoiceSubmit,
+  idleLabel,
+  textPlaceholder,
+  isSubmitting = false,
+  submittingLabel,
+}: ChatInputProps) {
   const { t } = usePreferences();
   const [value, setValue] = useState("");
   const [readOnly, setReadOnly] = useState(true);
@@ -21,8 +32,8 @@ export default function ChatInput({ onSubmit, onVoiceSubmit }: ChatInputProps) {
 
   const submit = () => {
     const content = value.trim();
-    if (!content) return;
-    onSubmit(content);
+    if (!content || isSubmitting) return;
+    void Promise.resolve(onSubmit(content));
     setValue("");
     setReadOnly(true);
   };
@@ -76,6 +87,10 @@ export default function ChatInput({ onSubmit, onVoiceSubmit }: ChatInputProps) {
     longPressTriggeredRef.current = false;
   };
 
+  const resolvedIdleLabel = idleLabel ?? t("composer.placeholder");
+  const resolvedTextPlaceholder = textPlaceholder ?? t("composer.textPlaceholder");
+  const resolvedSubmittingLabel = submittingLabel ?? t("composer.recording");
+
   return (
     <div className="shrink-0 bg-bg px-[10px] py-2">
       <div
@@ -99,7 +114,11 @@ export default function ChatInput({ onSubmit, onVoiceSubmit }: ChatInputProps) {
               submit();
             }
           }}
-          onFocus={() => setReadOnly(false)}
+          onFocus={() => {
+            if (!isSubmitting) {
+              setReadOnly(false);
+            }
+          }}
           onBlur={() => {
             if (!value.trim()) {
               setReadOnly(true);
@@ -110,19 +129,20 @@ export default function ChatInput({ onSubmit, onVoiceSubmit }: ChatInputProps) {
           onPointerLeave={handleFieldPointerCancel}
           onPointerCancel={handleFieldPointerCancel}
           onClick={() => {
-            if (readOnly) {
+            if (readOnly && !isSubmitting) {
               enableTextModeAndFocus();
             }
           }}
-          placeholder={readOnly || hasContent ? "" : t("composer.textPlaceholder")}
+          placeholder={readOnly || hasContent ? "" : resolvedTextPlaceholder}
           className={cn(
             "block w-full resize-none rounded-[12px] bg-surface py-4 pl-4 text-base leading-6 text-text placeholder:text-input-placeholder",
             "focus:outline-none focus-visible:shadow-none",
             "max-h-[168px] min-h-[54px]",
-            hasContent ? "pr-[64px]" : "pr-4"
+            hasContent || isSubmitting ? "pr-[64px]" : "pr-4",
+            isSubmitting && "opacity-80"
           )}
           rows={1}
-          aria-label={t("composer.placeholder")}
+          aria-label={resolvedIdleLabel}
         />
 
         {readOnly && !hasContent && (
@@ -130,33 +150,64 @@ export default function ChatInput({ onSubmit, onVoiceSubmit }: ChatInputProps) {
             <span
               className={cn(
                 "truncate text-center text-base font-medium",
-                isRecording
+                isSubmitting || isRecording
                   ? "text-primary"
                   : "text-text-tertiary/65"
               )}
             >
-              {isRecording ? t("composer.recording") : t("composer.placeholder")}
+              {isSubmitting
+                ? resolvedSubmittingLabel
+                : isRecording
+                  ? t("composer.recording")
+                  : resolvedIdleLabel}
             </span>
           </div>
         )}
 
-        {hasContent && (
+        {(hasContent || isSubmitting) && (
           <div className="absolute bottom-0 right-0 top-0 flex items-end pr-4">
             <div className="mb-[7px] flex h-10 items-center">
               <button
                 type="button"
                 onClick={submit}
-                className="flex h-10 w-10 items-center justify-center rounded-full text-primary transition active:scale-[0.9]"
+                disabled={isSubmitting}
+                className="flex h-10 w-10 items-center justify-center rounded-full text-primary transition active:scale-[0.9] disabled:cursor-default disabled:opacity-90"
                 title={t("composer.send")}
                 aria-label={t("composer.send")}
               >
-                <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
-                  <circle cx="20" cy="20" r="20" fill="currentColor" />
-                  <path
-                    d="M13 20.5 25.8 14.2c.5-.25 1 .25.77.76l-5.92 13.08c-.22.5-.95.42-1.06-.11l-1.12-5.4a1.1 1.1 0 0 0-.86-.85l-4.5-.88c-.54-.1-.62-.83-.11-1.08Z"
-                    fill="var(--on-primary)"
-                  />
-                </svg>
+                {isSubmitting ? (
+                  <span className="flex h-10 w-10 items-center justify-center rounded-full bg-primary text-on-primary">
+                    <svg
+                      className="h-5 w-5 animate-spin"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      aria-hidden="true"
+                    >
+                      <circle
+                        cx="12"
+                        cy="12"
+                        r="9"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        opacity="0.28"
+                      />
+                      <path
+                        d="M21 12a9 9 0 0 0-9-9"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                      />
+                    </svg>
+                  </span>
+                ) : (
+                  <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
+                    <circle cx="20" cy="20" r="20" fill="currentColor" />
+                    <path
+                      d="M13 20.5 25.8 14.2c.5-.25 1 .25.77.76l-5.92 13.08c-.22.5-.95.42-1.06-.11l-1.12-5.4a1.1 1.1 0 0 0-.86-.85l-4.5-.88c-.54-.1-.62-.83-.11-1.08Z"
+                      fill="var(--on-primary)"
+                    />
+                  </svg>
+                )}
               </button>
             </div>
           </div>

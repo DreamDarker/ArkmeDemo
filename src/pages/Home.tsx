@@ -1,4 +1,4 @@
-import React from "react";
+﻿import React from "react";
 import AppShell from "@/layouts/AppShell";
 import ChatBubble from "@/components/ChatBubble";
 import ChatInput from "@/components/ChatInput";
@@ -66,6 +66,7 @@ const aiConversationReadCountStorageKey = "arkme-demo.aiConversationReadCount";
 const browserNotificationPromptedStorageKey = "arkme-demo.browserNotificationPrompted";
 const createdSelfRecordsStorageKey = "arkme-demo.selfRecords";
 const arrangementsStorageKey = "arkme-demo.arrangements";
+const arrangementAiConfigStorageKey = "arkme-demo.arrangementAiConfig";
 const searchHistoryStorageKey = "arkme-demo.searchHistory";
 const aiConversationTotalCount = aiConversationLogEntries.length;
 const maxSearchHistoryCount = 4;
@@ -118,6 +119,35 @@ type ArrangementSource = {
   text: string;
 };
 
+type ArrangementAiConfig = {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+};
+
+type ArrangementAiConfidence = "low" | "medium" | "high";
+type ArrangementAiAction = "create" | "update" | "complete" | "merge";
+
+type ArrangementAiRecognitionResult = {
+  action: ArrangementAiAction;
+  targetUid: string;
+  targetUids: string[];
+  title: string;
+  content: string;
+  kind: ArrangementKind;
+  priority: ArrangementPriority;
+  scheduledAt: string;
+  scheduledAtText: string;
+  location: string;
+  participants: string[];
+  tags: string[];
+  completionCriteria: string;
+  confidence: ArrangementAiConfidence;
+  notes: string;
+  optimizationSummary: string;
+  rawResponse: string;
+};
+
 type ArrangementItem = {
   uid: string;
   title: string;
@@ -136,6 +166,10 @@ type ArrangementItem = {
   status: ArrangementStatus;
   completedAt: number | null;
   pausedAt: number | null;
+  aiAction: ArrangementAiAction | null;
+  aiSummary: string;
+  aiRelatedArrangementTitles: string[];
+  aiProcessedAt: number | null;
   createAt: number;
   updateAt: number;
 };
@@ -277,6 +311,77 @@ function persistCreatedSelfRecords(records: RecordItem[]) {
   }
 }
 
+function getInitialArrangementAiConfig(): ArrangementAiConfig {
+  if (typeof window === "undefined") {
+    return {
+      apiKey: "",
+      baseUrl: "https://api.openai.com/v1",
+      model: "",
+    };
+  }
+
+  try {
+    const storedValue = window.localStorage.getItem(arrangementAiConfigStorageKey);
+    if (!storedValue) {
+      return {
+        apiKey: "",
+        baseUrl: "https://api.openai.com/v1",
+        model: "",
+      };
+    }
+
+    const parsedValue = JSON.parse(storedValue);
+    if (!parsedValue || typeof parsedValue !== "object") {
+      return {
+        apiKey: "",
+        baseUrl: "https://api.openai.com/v1",
+        model: "",
+      };
+    }
+
+    return {
+      apiKey: typeof parsedValue.apiKey === "string" ? parsedValue.apiKey.trim() : "",
+      baseUrl:
+        typeof parsedValue.baseUrl === "string" && parsedValue.baseUrl.trim()
+          ? parsedValue.baseUrl.trim()
+          : "https://api.openai.com/v1",
+      model: typeof parsedValue.model === "string" ? parsedValue.model.trim() : "",
+    };
+  } catch {
+    return {
+      apiKey: "",
+      baseUrl: "https://api.openai.com/v1",
+      model: "",
+    };
+  }
+}
+
+function persistArrangementAiConfig(config: ArrangementAiConfig) {
+  if (typeof window === "undefined") return;
+
+  try {
+    window.localStorage.setItem(arrangementAiConfigStorageKey, JSON.stringify(config));
+  } catch {
+    // Keep the in-memory configuration if storage is unavailable.
+  }
+}
+
+function sanitizeArrangementAiToken(value: string) {
+  return value.replace(/[\s\u200B-\u200D\uFEFF\u2060]/g, "");
+}
+
+function hasOnlyPrintableAscii(value: string) {
+  return /^[\x21-\x7E]+$/.test(value);
+}
+
+function normalizeArrangementAiConfig(config: ArrangementAiConfig): ArrangementAiConfig {
+  return {
+    apiKey: sanitizeArrangementAiToken(config.apiKey.trim()),
+    baseUrl: config.baseUrl.trim(),
+    model: config.model.trim(),
+  };
+}
+
 function normalizeStoredArrangement(value: unknown): ArrangementItem | null {
   if (!value || typeof value !== "object") return null;
 
@@ -352,38 +457,54 @@ function normalizeStoredArrangement(value: unknown): ArrangementItem | null {
     status: normalizedStatus,
     completedAt,
     pausedAt,
+    aiAction:
+      arrangement.aiAction === "create" ||
+      arrangement.aiAction === "update" ||
+      arrangement.aiAction === "complete" ||
+      arrangement.aiAction === "merge"
+        ? arrangement.aiAction
+        : null,
+    aiSummary: typeof arrangement.aiSummary === "string" ? arrangement.aiSummary.trim() : "",
+    aiRelatedArrangementTitles: normalizeArrangementTextList(
+      arrangement.aiRelatedArrangementTitles
+    ),
+    aiProcessedAt:
+      typeof arrangement.aiProcessedAt === "number" &&
+      Number.isFinite(arrangement.aiProcessedAt)
+        ? arrangement.aiProcessedAt
+        : null,
     createAt: arrangement.createAt,
     updateAt: arrangement.updateAt,
   };
 }
 
 const arrangementKindOptions: Array<{ value: ArrangementKind; label: string }> = [
-  { value: "task", label: "任务" },
-  { value: "schedule", label: "日程" },
-  { value: "reminder", label: "提醒" },
-  { value: "note", label: "待定" },
+  { value: "task", label: "\u4efb\u52a1" },
+  { value: "schedule", label: "\u65e5\u7a0b" },
+  { value: "reminder", label: "\u63d0\u9192" },
+  { value: "note", label: "\u5f85\u5b9a" },
 ];
 
 const arrangementPriorityOptions: Array<{ value: ArrangementPriority; label: string }> = [
-  { value: "normal", label: "普通" },
-  { value: "important", label: "重要" },
-  { value: "urgent", label: "紧急" },
-  { value: "low", label: "低优先" },
+  { value: "normal", label: "\u666e\u901a" },
+  { value: "important", label: "\u91cd\u8981" },
+  { value: "urgent", label: "\u7d27\u6025" },
+  { value: "low", label: "\u4f4e\u4f18\u5148" },
 ];
 
 const defaultArrangementSource: ArrangementSource = {
   type: "manual",
-  label: "手动创建",
+  label: "\u624b\u52a8\u521b\u5efa",
   text: "",
 };
 
 function getArrangementKindLabel(kind: ArrangementKind) {
-  return arrangementKindOptions.find((option) => option.value === kind)?.label ?? "任务";
+  return arrangementKindOptions.find((option) => option.value === kind)?.label ?? "\u4efb\u52a1";
 }
 
 function getArrangementPriorityLabel(priority: ArrangementPriority) {
   return (
-    arrangementPriorityOptions.find((option) => option.value === priority)?.label ?? "普通"
+    arrangementPriorityOptions.find((option) => option.value === priority)?.label ?? "\u666e\u901a"
   );
 }
 
@@ -398,6 +519,22 @@ function getArrangementPriorityPillClass(priority: ArrangementPriority) {
     return "bg-surface-subtle text-text-tertiary";
   }
   return "bg-primary-soft text-primary";
+}
+
+function getArrangementAiActionLabel(action: ArrangementAiAction | null) {
+  if (action === "complete") return "标记完成";
+  if (action === "merge") return "合并重规划";
+  if (action === "update") return "更新原安排";
+  if (action === "create") return "新建草稿";
+  return "";
+}
+
+function shouldShowArrangementKind(kind: ArrangementKind) {
+  return kind !== "task";
+}
+
+function shouldShowArrangementPriority(priority: ArrangementPriority) {
+  return priority !== "normal";
 }
 
 function normalizeArrangementTextList(value: unknown) {
@@ -440,8 +577,8 @@ function normalizeArrangementSource(value: unknown): ArrangementSource {
       typeof source.label === "string" && source.label.trim()
         ? source.label.trim()
         : type === "manual"
-          ? "手动创建"
-          : "文本识别",
+          ? "\u624b\u52a8\u521b\u5efa"
+          : "\u6587\u672c\u8bc6\u522b",
     text: typeof source.text === "string" ? source.text.trim() : "",
   };
 }
@@ -456,15 +593,386 @@ function normalizeArrangementSources(value: unknown, fallback: ArrangementSource
   return sources.length > 0 ? sources : [fallback];
 }
 
+function isArrangementAiConfigReady(config: ArrangementAiConfig) {
+  return Boolean(config.apiKey && config.baseUrl && config.model);
+}
+
+function normalizeArrangementAiConfidence(value: unknown): ArrangementAiConfidence {
+  if (value === "high" || value === "low") return value;
+  return "medium";
+}
+
+function normalizeArrangementAiRecognitionResult(
+  value: unknown,
+  rawResponse: string,
+  fallbackText: string
+): ArrangementAiRecognitionResult {
+  const result = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  const fallbackTitle = fallbackText.trim().slice(0, 18) || "\u672a\u547d\u540d\u5b89\u6392";
+  const fallbackContent = fallbackText.trim() || "\u672a\u8bc6\u522b\u5230\u660e\u786e\u5b89\u6392\u5185\u5bb9";
+  const kind =
+    result.kind === "schedule" ||
+    result.kind === "reminder" ||
+    result.kind === "note" ||
+    result.kind === "task"
+      ? result.kind
+      : "task";
+  const priority =
+    result.priority === "low" ||
+    result.priority === "important" ||
+    result.priority === "urgent" ||
+    result.priority === "normal"
+      ? result.priority
+      : "normal";
+
+  return {
+    action:
+      result.action === "update" ||
+      result.action === "complete" ||
+      result.action === "merge"
+        ? result.action
+        : "create",
+    targetUid: typeof result.targetUid === "string" ? result.targetUid.trim() : "",
+    targetUids: normalizeArrangementTextList(result.targetUids),
+    title: typeof result.title === "string" && result.title.trim() ? result.title.trim() : fallbackTitle,
+    content:
+      typeof result.content === "string" && result.content.trim()
+        ? result.content.trim()
+        : fallbackContent,
+    kind,
+    priority,
+    scheduledAt: typeof result.scheduledAt === "string" ? result.scheduledAt.trim() : "",
+    scheduledAtText:
+      typeof result.scheduledAtText === "string" ? result.scheduledAtText.trim() : "",
+    location: typeof result.location === "string" ? result.location.trim() : "",
+    participants: normalizeArrangementTextList(result.participants),
+    tags: normalizeArrangementTextList(result.tags),
+    completionCriteria:
+      typeof result.completionCriteria === "string"
+        ? result.completionCriteria.trim()
+        : "",
+    confidence: normalizeArrangementAiConfidence(result.confidence),
+    notes: typeof result.notes === "string" ? result.notes.trim() : "",
+    optimizationSummary:
+      typeof result.optimizationSummary === "string"
+        ? result.optimizationSummary.trim()
+        : "",
+    rawResponse,
+  };
+}
+
+function extractArrangementTextCues(arrangement: ArrangementItem) {
+  return dedupeArrangementTextList([
+    arrangement.title,
+    arrangement.location,
+    ...arrangement.participants,
+    ...arrangement.tags,
+  ]).filter((item) => item.length >= 2);
+}
+
+function getArrangementAiContextRank(inputText: string, arrangement: ArrangementItem) {
+  const normalizedInput = inputText.trim().toLowerCase();
+  if (!normalizedInput) return 0;
+
+  let score = 0;
+  for (const cue of extractArrangementTextCues(arrangement)) {
+    const normalizedCue = cue.toLowerCase();
+    if (normalizedInput.includes(normalizedCue)) {
+      score += arrangement.location === cue ? 8 : 4;
+    }
+  }
+
+  if (/今天|今晚|明天|后天|下周|周|星期|上午|下午|晚上|中午|凌晨/.test(inputText)) {
+    score += arrangement.scheduledAt !== null ? 2 : 0;
+  }
+  if (arrangement.status === "todo") score += 2;
+  if (arrangement.priority === "urgent") score += 2;
+  if (arrangement.priority === "important") score += 1;
+
+  return score;
+}
+
+function selectRelevantArrangementsForAi(inputText: string, arrangements: ArrangementItem[]) {
+  const openArrangements = arrangements.filter((arrangement) => arrangement.status !== "completed");
+
+  return [...openArrangements]
+    .sort((a, b) => {
+      const scoreDiff =
+        getArrangementAiContextRank(inputText, b) -
+        getArrangementAiContextRank(inputText, a);
+      if (scoreDiff !== 0) return scoreDiff;
+
+      const timeA = a.scheduledAt ?? Number.MAX_SAFE_INTEGER;
+      const timeB = b.scheduledAt ?? Number.MAX_SAFE_INTEGER;
+      if (timeA !== timeB) return timeA - timeB;
+
+      return b.updateAt - a.updateAt;
+    })
+    .slice(0, 12);
+}
+
+function formatArrangementAiContext(inputText: string, arrangements: ArrangementItem[]) {
+  const openArrangements = selectRelevantArrangementsForAi(inputText, arrangements);
+
+  if (openArrangements.length === 0) {
+    return "No unfinished arrangements.";
+  }
+
+  return openArrangements
+    .map((arrangement, index) => {
+      const timeLabel = arrangement.scheduledAt
+        ? formatArrangementDateTime(arrangement.scheduledAt)
+        : "unscheduled";
+      return [
+        `${index + 1}. uid=${arrangement.uid} | ${arrangement.title}`,
+        `status=${arrangement.status}`,
+        `priority=${arrangement.priority}`,
+        `kind=${arrangement.kind}`,
+        `time=${timeLabel}`,
+        arrangement.location ? `location=${arrangement.location}` : "",
+        arrangement.participants.length > 0
+          ? `participants=${arrangement.participants.join("/")}`
+          : "",
+        arrangement.tags.length > 0 ? `tags=${arrangement.tags.join("/")}` : "",
+        arrangement.content ? `content=${arrangement.content}` : "",
+      ]
+        .filter(Boolean)
+        .join(" | ");
+    })
+    .join("\n");
+}
+
+function dedupeArrangementTextList(items: string[]) {
+  return Array.from(new Set(items.map((item) => item.trim()).filter(Boolean)));
+}
+
+function dedupeArrangementSources(sources: ArrangementSource[]) {
+  const seen = new Set<string>();
+  return sources.filter((source) => {
+    const key = `${source.type}::${source.label}::${source.text}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function resolveArrangementAiEndpoint(baseUrl: string) {
+  const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "");
+  if (normalizedBaseUrl.endsWith("/chat/completions")) {
+    return normalizedBaseUrl;
+  }
+  return `${normalizedBaseUrl}/chat/completions`;
+}
+
+function extractJsonBlock(text: string) {
+  const codeFenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (codeFenceMatch?.[1]) {
+    return codeFenceMatch[1].trim();
+  }
+
+  const firstBrace = text.indexOf("{");
+  const lastBrace = text.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    return text.slice(firstBrace, lastBrace + 1).trim();
+  }
+
+  return text.trim();
+}
+
+async function recognizeArrangementFromText(
+  config: ArrangementAiConfig,
+  inputText: string,
+  arrangements: ArrangementItem[]
+): Promise<ArrangementAiRecognitionResult> {
+  const normalizedConfig = normalizeArrangementAiConfig(config);
+  if (!hasOnlyPrintableAscii(normalizedConfig.apiKey)) {
+    throw new Error("API Key \u5305\u542b\u975e ASCII \u5b57\u7b26\u3002\u8bf7\u91cd\u65b0\u7c98\u8d34\uff0c\u907f\u514d\u4e2d\u6587\u7a7a\u683c\u3001\u6362\u884c\u6216\u96f6\u5bbd\u5b57\u7b26\u3002");
+  }
+
+  const response = await fetch(resolveArrangementAiEndpoint(normalizedConfig.baseUrl), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${normalizedConfig.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: normalizedConfig.model,
+      temperature: 0.2,
+      messages: [
+        {
+          role: "system",
+          content:
+            [
+              "You extract one arrangement candidate from user text.",
+              "Return JSON only, without markdown fences.",
+              "Today is 2026-05-17 and timezone is Asia/Hong_Kong (UTC+08:00).",
+              "If the user mentions a relative time such as tomorrow, next Monday evening, or tonight, resolve it into scheduledAt using this timezone when reasonably inferable.",
+              "scheduledAt must be in YYYY-MM-DDTHH:mm format or an empty string when you cannot infer a concrete datetime.",
+              "Always infer kind and location when there is enough evidence; otherwise use kind=task and location=''.",
+              "Assess priority relative to the unfinished arrangements I provide. Use urgent only when it is clearly more time-sensitive or more important than most unfinished arrangements.",
+              "Choose action=create when this is a new arrangement.",
+              "Choose action=update when the text is a follow-up, refinement, or better wording for one existing arrangement.",
+              "Choose action=complete when the text strongly indicates one existing arrangement is already finished.",
+              "Choose action=merge when the text should cause one or more existing arrangements to be consolidated or replanned together.",
+              "Treat same location plus nearby time as a strong merge/replan signal, even if wording differs.",
+              "When action is update, complete, or merge, fill targetUid with the best primary uid from the provided arrangements.",
+              "When action is merge, fill targetUids with all related arrangement uids that should be grouped or consolidated.",
+              "Do not only append text. Optimize the resulting arrangement so the user gets a cleaner, more useful plan.",
+              "Use this schema:",
+              '{"action":"create|update|complete|merge","targetUid":"string","targetUids":["string"],"title":"string","content":"string","kind":"task|schedule|reminder|note","priority":"low|normal|important|urgent","scheduledAt":"string","scheduledAtText":"string","location":"string","participants":["string"],"tags":["string"],"completionCriteria":"string","confidence":"low|medium|high","notes":"string","optimizationSummary":"string"}',
+              "If the text is ambiguous, keep confidence low and explain uncertainty in notes.",
+            ].join(" "),
+        },
+        {
+          role: "user",
+          content: [
+            "User text:",
+            inputText,
+            "",
+            "Current unfinished arrangements for priority comparison and merge/replan reference:",
+            formatArrangementAiContext(inputText, arrangements),
+          ].join("\n"),
+        },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(errorText || `HTTP ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+    error?: { message?: string };
+  };
+  const rawContent = payload.choices?.[0]?.message?.content?.trim() ?? "";
+  if (!rawContent) {
+    throw new Error(payload.error?.message || "\u6a21\u578b\u6ca1\u6709\u8fd4\u56de\u53ef\u89e3\u6790\u5185\u5bb9");
+  }
+
+  try {
+    return normalizeArrangementAiRecognitionResult(
+      JSON.parse(extractJsonBlock(rawContent)),
+      rawContent,
+      inputText
+    );
+  } catch {
+    throw new Error("\u6a21\u578b\u8fd4\u56de\u5185\u5bb9\u4e0d\u662f\u6709\u6548 JSON\uff0c\u8bf7\u8c03\u6574\u6a21\u578b\u6216 Base URL \u540e\u91cd\u8bd5");
+  }
+}
+
+function inferScheduledAtFromNaturalLanguage(text: string, now = new Date()) {
+  const normalized = text.trim();
+  if (!normalized) return null;
+
+  const directMatch = normalized.match(/(\d{4})[-/.\u5e74](\d{1,2})[-/.\u6708](\d{1,2})[\u65e5\u53f7]?(?:\s*|[ T])(?:(\u4e0a\u5348|\u4e2d\u5348|\u4e0b\u5348|\u665a\u4e0a|\u51cc\u6668))?\s*(\d{1,2})(?:[:\u70b9\u65f6](\d{1,2}))?/);
+  if (directMatch) {
+    const [, year, month, day, period, hourValue, minuteValue] = directMatch;
+    const hour = Number(hourValue);
+    const minute = minuteValue ? Number(minuteValue) : 0;
+    const date = new Date(Number(year), Number(month) - 1, Number(day), normalizeChineseHour(hour, period), minute, 0, 0);
+    return Number.isFinite(date.getTime()) ? date.getTime() : null;
+  }
+
+  const target = new Date(now);
+  target.setSeconds(0, 0);
+  let matchedDay = false;
+
+  if (/\u4eca\u5929/.test(normalized)) {
+    matchedDay = true;
+  } else if (/\u660e\u5929/.test(normalized)) {
+    target.setDate(target.getDate() + 1);
+    matchedDay = true;
+  } else if (/\u540e\u5929/.test(normalized)) {
+    target.setDate(target.getDate() + 2);
+    matchedDay = true;
+  } else if (/\u5927\u540e\u5929/.test(normalized)) {
+    target.setDate(target.getDate() + 3);
+    matchedDay = true;
+  } else {
+    const weekMatch = normalized.match(/(\u672c\u5468|\u8fd9\u5468|\u4e0b\u5468)?(?:\u5468|\u661f\u671f)([\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u65e5\u5929])/);
+    if (weekMatch) {
+      const [, prefix = "", weekdayToken] = weekMatch;
+      const weekdayMap: Record<string, number> = {
+        "\u4e00": 1,
+        "\u4e8c": 2,
+        "\u4e09": 3,
+        "\u56db": 4,
+        "\u4e94": 5,
+        "\u516d": 6,
+        "\u65e5": 0,
+        "\u5929": 0,
+      };
+      const targetWeekday = weekdayMap[weekdayToken];
+      const currentWeekday = target.getDay();
+      let delta = (targetWeekday - currentWeekday + 7) % 7;
+      if (prefix === "\u4e0b\u5468") {
+        delta = delta === 0 ? 7 : delta + 7;
+      } else if (prefix === "\u672c\u5468" || prefix === "\u8fd9\u5468") {
+        delta = delta === 0 ? 0 : delta;
+      } else if (delta === 0 && !/\u4eca\u5929/.test(normalized)) {
+        delta = 7;
+      }
+      target.setDate(target.getDate() + delta);
+      matchedDay = true;
+    }
+  }
+
+  if (!matchedDay) return null;
+
+  const timeMatch = normalized.match(/(\u51cc\u6668|\u65e9\u4e0a|\u4e0a\u5348|\u4e2d\u5348|\u4e0b\u5348|\u508d\u665a|\u665a\u4e0a)?\s*(\d{1,2})(?:[:\u70b9\u65f6](\d{1,2}))?(?:\u534a|\u5206)?/);
+  let hour = 9;
+  let minute = 0;
+  let period = "";
+  if (timeMatch) {
+    period = timeMatch[1] ?? "";
+    hour = Number(timeMatch[2]);
+    minute = timeMatch[3] ? Number(timeMatch[3]) : /\u534a/.test(timeMatch[0]) ? 30 : 0;
+  } else if (/\u51cc\u6668/.test(normalized)) {
+    hour = 1;
+    period = "\u51cc\u6668";
+  } else if (/(\u65e9\u4e0a|\u4e0a\u5348)/.test(normalized)) {
+    hour = 9;
+    period = "\u4e0a\u5348";
+  } else if (/\u4e2d\u5348/.test(normalized)) {
+    hour = 12;
+    period = "\u4e2d\u5348";
+  } else if (/(\u4e0b\u5348|\u508d\u665a)/.test(normalized)) {
+    hour = 15;
+    period = "\u4e0b\u5348";
+  } else if (/\u665a\u4e0a/.test(normalized)) {
+    hour = 19;
+    period = "\u665a\u4e0a";
+  }
+
+  target.setHours(normalizeChineseHour(hour, period), minute, 0, 0);
+  return Number.isFinite(target.getTime()) ? target.getTime() : null;
+}
+
+function normalizeChineseHour(hour: number, period?: string) {
+  if (!Number.isFinite(hour)) return 9;
+  if (period === "\u51cc\u6668") {
+    return hour === 12 ? 0 : hour;
+  }
+  if (period === "\u4e2d\u5348") {
+    return hour < 11 ? hour + 12 : hour;
+  }
+  if (period === "\u4e0b\u5348" || period === "\u508d\u665a" || period === "\u665a\u4e0a") {
+    return hour < 12 ? hour + 12 : hour;
+  }
+  return hour;
+}
+
 function parseArrangementTextList(value: string) {
   return value
-    .split(/[\n,，、]/)
+    .split(/[\n,\uff0c\u3001]/)
     .map((item) => item.trim())
     .filter(Boolean);
 }
 
 function formatArrangementTextList(items: string[]) {
-  return items.join("、");
+  return items.join("\u3001");
 }
 
 function parseArrangementChecklist(value: string, now: number): ArrangementChecklistItem[] {
@@ -510,7 +1018,7 @@ function persistArrangements(arrangements: ArrangementItem[]) {
 }
 
 function formatArrangementDateTime(timestamp: number | null) {
-  if (!timestamp) return "未设置时间";
+  if (!timestamp) return "\u672a\u8bbe\u7f6e\u65f6\u95f4";
 
   const date = new Date(timestamp);
   const year = date.getFullYear();
@@ -519,6 +1027,46 @@ function formatArrangementDateTime(timestamp: number | null) {
   const hours = String(date.getHours()).padStart(2, "0");
   const minutes = String(date.getMinutes()).padStart(2, "0");
   return `${year}-${month}-${day} ${hours}:${minutes}`;
+}
+
+function formatArrangementCountdown(timestamp: number | null, now: number) {
+  if (timestamp === null) return "";
+
+  const diff = timestamp - now;
+  const absMinutes = Math.max(1, Math.round(Math.abs(diff) / 60000));
+  const days = Math.floor(absMinutes / 1440);
+  const hours = Math.floor((absMinutes % 1440) / 60);
+  const minutes = absMinutes % 60;
+  const parts: string[] = [];
+
+  if (days > 0) parts.push(`${days}\u5929`);
+  if (hours > 0) parts.push(`${hours}\u5c0f\u65f6`);
+  if (minutes > 0 && days === 0) parts.push(`${minutes}\u5206\u949f`);
+  if (parts.length === 0) parts.push("1\u5206\u949f");
+
+  return diff >= 0 ? `\u8fd8\u6709${parts.join("")}` : `\u5df2\u8fc7${parts.join("")}`;
+}
+function getArrangementCountdownClass(
+  status: ArrangementStatus,
+  priority: ArrangementPriority,
+  scheduledAt: number | null,
+  now: number
+) {
+  if (scheduledAt === null || status === "completed" || status === "expired") {
+    return "text-text-tertiary";
+  }
+
+  const diff = scheduledAt - now;
+  if (diff <= 60 * 60 * 1000 || priority === "urgent") {
+    return "text-rose-600 dark:text-rose-300";
+  }
+  if (diff <= 24 * 60 * 60 * 1000 || priority === "important") {
+    return "text-amber-600 dark:text-amber-300";
+  }
+  if (priority === "low") {
+    return "text-text-tertiary";
+  }
+  return "text-primary";
 }
 
 function toDateTimeLocalValue(timestamp: number | null) {
@@ -699,9 +1247,9 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
   const [sendToSelfTargetUid, setSendToSelfTargetUid] = React.useState<string | null>(null);
   const [activeTestIdentityId, setActiveTestIdentityId] = React.useState<string | null>(null);
   const [testConversationTargetUid, setTestConversationTargetUid] = React.useState<string | null>(null);
-  const [settingsView, setSettingsView] = React.useState<null | "settings" | "appearance" | "about">(
-    null
-  );
+  const [settingsView, setSettingsView] = React.useState<
+    null | "settings" | "appearance" | "about" | "arrangement-ai"
+  >(null);
   const [searchQuery, setSearchQuery] = React.useState("");
   const [searchHistory, setSearchHistory] = React.useState(getInitialSearchHistory);
   const [recordDetail, setRecordDetail] = React.useState<RecordItem | null>(null);
@@ -712,6 +1260,9 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
   const selfDemoBaseTime = React.useMemo(() => Date.now(), []);
   const [createdSelfRecords, setCreatedSelfRecords] = React.useState(
     getInitialCreatedSelfRecords
+  );
+  const [arrangementAiConfig, setArrangementAiConfig] = React.useState(
+    getInitialArrangementAiConfig
   );
   const [testIdentities, setTestIdentities] = React.useState(getInitialTestIdentities);
   const [testGroups, setTestGroups] = React.useState(getInitialTestGroups);
@@ -959,7 +1510,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
             conversationId,
             conversationType: "private",
             title: identity.name,
-            subtitle: identity.note || "测试私聊",
+            subtitle: identity.note || "娴嬭瘯绉佽亰",
             avatarLabel: identity.avatarLabel,
             color: identity.color,
             identity,
@@ -1448,11 +1999,26 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
       return <AboutScreen onBack={() => setSettingsView(null)} />;
     }
 
+    if (settingsView === "arrangement-ai") {
+      return (
+        <ArrangementAiSettingsScreen
+          config={arrangementAiConfig}
+          onBack={() => setSettingsView("settings")}
+          onSave={(nextConfig) => {
+            setArrangementAiConfig(nextConfig);
+            persistArrangementAiConfig(nextConfig);
+          }}
+        />
+      );
+    }
+
     if (settingsView === "settings") {
       return (
         <SettingsScreen
           onBack={() => setSettingsView(null)}
           onOpenAppearance={() => setSettingsView("appearance")}
+          onOpenArrangementAi={() => setSettingsView("arrangement-ai")}
+          arrangementAiConfig={arrangementAiConfig}
         />
       );
     }
@@ -1528,7 +2094,12 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     }
 
     if (currentPage === "arrangements") {
-      return <ArrangementsPreview />;
+      return (
+        <ArrangementsPreview
+          aiConfig={arrangementAiConfig}
+          onOpenAiSettings={() => setSettingsView("arrangement-ai")}
+        />
+      );
     }
 
     if (currentPage === "insight") {
@@ -1977,17 +2548,17 @@ function recordMatchesQuickType(record: RecordItem, type: QuickSearchType) {
 
   switch (type) {
     case "image":
-      return /图片|照片|视频|image|photo|video/.test(combined);
+      return /鍥剧墖|鐓х墖|瑙嗛|image|photo|video/.test(combined);
     case "audio":
-      return /语音|音频|录音|voice|audio|recording/.test(combined);
+      return /璇煶|闊抽|褰曢煶|voice|audio|recording/.test(combined);
     case "link":
-      return /链接|http|link|url/.test(combined);
+      return /閾炬帴|http|link|url/.test(combined);
     case "file":
-      return /文件|文档|file|document/.test(combined);
+      return /鏂囦欢|鏂囨。|file|document/.test(combined);
     case "longArticle":
       return Array.from(record.text_content).length >= 80;
     case "contact":
-      return /联系人|同事|候选人|用户|ai|contact|user/.test(combined);
+      return /鑱旂郴浜簗鍚屼簨|鍊欓€変汉|鐢ㄦ埛|ai|contact|user/.test(combined);
     default:
       return true;
   }
@@ -2114,7 +2685,7 @@ function HomeNewMessagePreview({
       type="button"
       className="flex w-full items-center rounded-[16px] border border-border-light bg-surface px-3 py-2.5 text-left shadow-[0_8px_24px_rgba(15,23,42,0.08)] transition hover:bg-[var(--record-card-hover-bg)] active:scale-[0.99] dark:shadow-[0_10px_28px_rgba(0,0,0,0.28)]"
       onClick={onOpen}
-      aria-label={`${t("homeMessagePreview.label")}，${preview.summary.title}`}
+      aria-label={t("homeMessagePreview.label") + "：" + preview.summary.title}
     >
       <AvatarUnreadWrap unreadCount={preview.unreadCount}>
         <TestConversationAvatar summary={preview.summary} className="h-[34px] w-[34px]" />
@@ -2456,7 +3027,11 @@ function TestConversationDrawerItem({
         <p className="mt-0.5 truncate text-xs leading-4 text-text-muted">
           {summary.conversationType === "group" &&
           summary.latestMessage.sender === "identity"
-            ? `${summary.memberIdentities.find((identity) => identity.id === summary.latestMessage.identityId)?.name ?? "成员"}：${summary.latestMessage.text}`
+            ? (summary.memberIdentities.find(
+                (identity) => identity.id === summary.latestMessage.identityId
+              )?.name ?? "成员") +
+              "：" +
+              summary.latestMessage.text
             : summary.latestMessage.text}
         </p>
       </div>
@@ -3067,9 +3642,16 @@ function MobileBottomNavigation({
   );
 }
 
-function ArrangementsPreview() {
+function ArrangementsPreview({
+  aiConfig,
+  onOpenAiSettings,
+}: {
+  aiConfig: ArrangementAiConfig;
+  onOpenAiSettings: () => void;
+}) {
   const [arrangements, setArrangements] = React.useState(getInitialArrangements);
   const [showForm, setShowForm] = React.useState(false);
+  const [showAiRecognizer, setShowAiRecognizer] = React.useState(false);
   const [activeArrangementId, setActiveArrangementId] = React.useState<string | null>(null);
   const [editingArrangementId, setEditingArrangementId] = React.useState<string | null>(null);
   const [title, setTitle] = React.useState("");
@@ -3082,30 +3664,74 @@ function ArrangementsPreview() {
   const [tagsText, setTagsText] = React.useState("");
   const [checklistText, setChecklistText] = React.useState("");
   const [completionCriteria, setCompletionCriteria] = React.useState("");
+  const [sourceType, setSourceType] = React.useState<ArrangementSourceType>("manual");
+  const [sourceLabel, setSourceLabel] = React.useState(defaultArrangementSource.label);
   const [sourceText, setSourceText] = React.useState("");
   const [saveHint, setSaveHint] = React.useState("");
+  const [aiInputText, setAiInputText] = React.useState("");
+  const [aiResult, setAiResult] = React.useState<ArrangementAiRecognitionResult | null>(null);
+  const [aiError, setAiError] = React.useState("");
+  const [aiLoading, setAiLoading] = React.useState(false);
+  const [pendingMergeTargetUids, setPendingMergeTargetUids] = React.useState<string[]>([]);
+  const [pendingSuggestedStatus, setPendingSuggestedStatus] = React.useState<ArrangementStatus | null>(null);
+  const [pendingOptimizationSummary, setPendingOptimizationSummary] = React.useState("");
+  const [pendingAiAction, setPendingAiAction] = React.useState<ArrangementAiAction | null>(null);
+  const [nowTick, setNowTick] = React.useState(() => Date.now());
   const activeArrangement =
     arrangements.find((arrangement) => arrangement.uid === activeArrangementId) ?? null;
   const editingArrangement =
     arrangements.find((arrangement) => arrangement.uid === editingArrangementId) ?? null;
   const canSubmit = title.trim().length > 0 && content.trim().length > 0;
+  const canSubmitAiRecognition = aiInputText.trim().length > 0 && !aiLoading;
+  const hasReadyAiConfig = isArrangementAiConfigReady(aiConfig);
   const todoCount = arrangements.filter((item) => item.status === "todo").length;
   const expiredCount = arrangements.filter((item) => item.status === "expired").length;
   const pausedCount = arrangements.filter((item) => item.status === "paused").length;
   const completedCount = arrangements.filter((item) => item.status === "completed").length;
+  const pendingMergeTargets = React.useMemo(
+    () =>
+      pendingMergeTargetUids
+        .map((uid) => arrangements.find((arrangement) => arrangement.uid === uid) ?? null)
+        .filter((arrangement): arrangement is ArrangementItem => Boolean(arrangement)),
+    [arrangements, pendingMergeTargetUids]
+  );
+  const aiResultTargetTitles = React.useMemo(() => {
+    if (!aiResult) return [];
+
+    return dedupeArrangementTextList(
+      [aiResult.targetUid, ...aiResult.targetUids]
+        .map((uid) => arrangements.find((arrangement) => arrangement.uid === uid)?.title ?? "")
+        .filter(Boolean)
+    );
+  }, [aiResult, arrangements]);
   const sortedArrangements = React.useMemo(
     () =>
       [...arrangements].sort((a, b) => {
         const statusRank: Record<ArrangementStatus, number> = {
           todo: 0,
-          expired: 1,
-          paused: 2,
-          completed: 3,
+          paused: 1,
+          completed: 2,
+          expired: 3,
         };
-        return statusRank[a.status] - statusRank[b.status] || b.updateAt - a.updateAt;
+        const rankDiff = statusRank[a.status] - statusRank[b.status];
+        if (rankDiff !== 0) return rankDiff;
+
+        const timeA = a.scheduledAt ?? Number.MAX_SAFE_INTEGER;
+        const timeB = b.scheduledAt ?? Number.MAX_SAFE_INTEGER;
+        if (timeA !== timeB) return timeA - timeB;
+
+        return b.updateAt - a.updateAt;
       }),
     [arrangements]
   );
+
+  React.useEffect(() => {
+    const timer = window.setInterval(() => {
+      setNowTick(Date.now());
+    }, 60000);
+
+    return () => window.clearInterval(timer);
+  }, []);
 
   React.useEffect(() => {
     const now = Date.now();
@@ -3118,7 +3744,7 @@ function ArrangementsPreview() {
     if (nextArrangements.some((arrangement, index) => arrangement !== arrangements[index])) {
       persistNextArrangements(nextArrangements);
     }
-  }, [arrangements]);
+  }, [arrangements, nowTick]);
 
   const resetForm = () => {
     setTitle("");
@@ -3131,7 +3757,13 @@ function ArrangementsPreview() {
     setTagsText("");
     setChecklistText("");
     setCompletionCriteria("");
+    setSourceType("manual");
+    setSourceLabel(defaultArrangementSource.label);
     setSourceText("");
+    setPendingMergeTargetUids([]);
+    setPendingSuggestedStatus(null);
+    setPendingOptimizationSummary("");
+    setPendingAiAction(null);
     setEditingArrangementId(null);
   };
 
@@ -3143,8 +3775,120 @@ function ArrangementsPreview() {
   const openCreateForm = () => {
     resetForm();
     setShowForm(true);
+    setShowAiRecognizer(false);
     setActiveArrangementId(null);
     setSaveHint("");
+  };
+
+  const resetAiRecognizer = () => {
+    setAiInputText("");
+    setAiResult(null);
+    setAiError("");
+    setAiLoading(false);
+  };
+
+  const openAiRecognizerWithInput = (initialText: string) => {
+    resetAiRecognizer();
+    setAiInputText(initialText.trim());
+    setShowForm(false);
+    setShowAiRecognizer(true);
+    setActiveArrangementId(null);
+    setSaveHint("");
+  };
+
+  const createAiDraftFromInput = async (rawInput: string) => {
+    const nextInput = rawInput.trim();
+    if (!nextInput) return;
+
+    if (!hasReadyAiConfig) {
+      openAiRecognizerWithInput(nextInput);
+      return;
+    }
+
+    setAiInputText(nextInput);
+    setAiError("");
+    setAiResult(null);
+    setAiLoading(true);
+
+    try {
+      const result = await recognizeArrangementFromText(aiConfig, nextInput, arrangements);
+      setAiResult(result);
+      if (
+        result.action === "create" ||
+        (!result.targetUid && result.targetUids.length === 0)
+      ) {
+        openAiDraftForm(result, nextInput);
+      } else {
+        openAiOptimizationForm(result, nextInput);
+      }
+    } catch (error) {
+      setAiError(error instanceof Error ? error.message : "AI 璇嗗埆澶辫触锛岃绋嶅悗閲嶈瘯");
+      setShowForm(false);
+      setShowAiRecognizer(true);
+      setActiveArrangementId(null);
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const openAiOptimizationForm = (
+    result: ArrangementAiRecognitionResult,
+    sourceOriginalText: string
+  ) => {
+    const targetUids = dedupeArrangementTextList(
+      [result.targetUid, ...result.targetUids].filter(Boolean)
+    );
+    const targets = targetUids
+      .map((uid) => arrangements.find((arrangement) => arrangement.uid === uid) ?? null)
+      .filter((arrangement): arrangement is ArrangementItem => Boolean(arrangement));
+
+    if (targets.length === 0) {
+      openAiDraftForm(result, sourceOriginalText);
+      return;
+    }
+
+    const primaryTarget = targets[0];
+    const parsedScheduledAt =
+      parseArrangementScheduledTime(result.scheduledAt) ??
+      inferScheduledAtFromNaturalLanguage(result.scheduledAtText || sourceOriginalText) ??
+      primaryTarget.scheduledAt;
+    const mergedParticipants = dedupeArrangementTextList([
+      ...targets.flatMap((item) => item.participants),
+      ...result.participants,
+    ]);
+    const mergedTags = dedupeArrangementTextList([
+      ...targets.flatMap((item) => item.tags),
+      ...result.tags,
+    ]);
+
+    setTitle(result.title || primaryTarget.title);
+    setContent(result.content || primaryTarget.content);
+    setScheduledTime(toDateTimeLocalValue(parsedScheduledAt));
+    setKind(result.kind || primaryTarget.kind);
+    setPriority(result.priority || primaryTarget.priority);
+    setLocation(result.location || primaryTarget.location);
+    setParticipantsText(formatArrangementTextList(mergedParticipants));
+    setTagsText(formatArrangementTextList(mergedTags));
+    setChecklistText(primaryTarget.checklist.map((item) => item.text).join("\n"));
+    setCompletionCriteria(result.completionCriteria || primaryTarget.completionCriteria);
+    setSourceType("text");
+    setSourceLabel("\u0041\u0049\u6587\u672c\u8bc6\u522b");
+    setSourceText(sourceOriginalText);
+    setPendingMergeTargetUids(targets.map((item) => item.uid));
+    setPendingSuggestedStatus(result.action === "complete" ? "completed" : null);
+    setPendingOptimizationSummary(result.optimizationSummary || result.notes);
+    setPendingAiAction(result.action);
+    setEditingArrangementId(primaryTarget.uid);
+    setShowAiRecognizer(false);
+    setShowForm(true);
+    setActiveArrangementId(null);
+    setSaveHint(
+      result.action === "complete"
+        ? "\u0041\u0049\u5efa\u8bae\u5c06\u8fd9\u6761\u5b89\u6392\u6807\u8bb0\u4e3a\u5b8c\u6210\uff0c\u8bf7\u786e\u8ba4\u540e\u4fdd\u5b58\u3002"
+        : targets.length > 1
+          ? "\u0041\u0049\u5efa\u8bae\u5c06\u76f8\u5173\u5b89\u6392\u8fdb\u884c\u5408\u5e76\u4e0e\u91cd\u65b0\u89c4\u5212\uff0c\u8bf7\u786e\u8ba4\u540e\u4fdd\u5b58\u3002"
+          : "\u0041\u0049\u5efa\u8bae\u66f4\u65b0\u539f\u6709\u5b89\u6392\uff0c\u8bf7\u786e\u8ba4\u540e\u4fdd\u5b58\u3002"
+    );
   };
 
   const openEditForm = (arrangement: ArrangementItem) => {
@@ -3158,10 +3902,49 @@ function ArrangementsPreview() {
     setTagsText(formatArrangementTextList(arrangement.tags));
     setChecklistText(arrangement.checklist.map((item) => item.text).join("\n"));
     setCompletionCriteria(arrangement.completionCriteria);
+    setSourceType(arrangement.sources[0]?.type ?? arrangement.source.type);
+    setSourceLabel(arrangement.sources[0]?.label ?? arrangement.source.label);
     setSourceText(arrangement.sources[0]?.text ?? arrangement.source.text);
+    setPendingMergeTargetUids([arrangement.uid]);
+    setPendingSuggestedStatus(null);
+    setPendingOptimizationSummary("");
+    setPendingAiAction(null);
     setEditingArrangementId(arrangement.uid);
     setShowForm(true);
+    setShowAiRecognizer(false);
     setSaveHint("");
+  };
+
+  const openAiDraftForm = (
+    result: ArrangementAiRecognitionResult,
+    sourceOriginalText = aiInputText.trim()
+  ) => {
+    resetForm();
+    setTitle(result.title);
+    setContent(result.content);
+    const parsedScheduledAt =
+      parseArrangementScheduledTime(result.scheduledAt) ??
+      inferScheduledAtFromNaturalLanguage(result.scheduledAtText || sourceOriginalText);
+    setScheduledTime(toDateTimeLocalValue(parsedScheduledAt));
+    setKind(result.kind);
+    setPriority(result.priority);
+    setLocation(result.location);
+    setParticipantsText(formatArrangementTextList(result.participants));
+    setTagsText(formatArrangementTextList(result.tags));
+    setCompletionCriteria(result.completionCriteria);
+    setSourceType("text");
+    setSourceLabel("\u0041\u0049\u6587\u672c\u8bc6\u522b");
+    setSourceText(sourceOriginalText);
+    setPendingOptimizationSummary(result.optimizationSummary || result.notes);
+    setPendingAiAction(result.action);
+    setShowAiRecognizer(false);
+    setShowForm(true);
+    setActiveArrangementId(null);
+    setSaveHint(
+      parsedScheduledAt === null && result.scheduledAtText
+        ? "\u5df2\u751f\u6210\u5b89\u6392\u8349\u7a3f\uff0c\u8bf7\u8865\u5145\u5177\u4f53\u65f6\u95f4\u540e\u4fdd\u5b58\u3002"
+        : "\u5df2\u751f\u6210\u5b89\u6392\u8349\u7a3f\uff0c\u8bf7\u786e\u8ba4\u5185\u5bb9\u540e\u4fdd\u5b58\u3002"
+    );
   };
 
   const updateArrangement = (
@@ -3188,45 +3971,93 @@ function ArrangementsPreview() {
     const normalizedCompletionCriteria = completionCriteria.trim();
     const normalizedSourceText = sourceText.trim();
     const nextSource: ArrangementSource = {
-      ...defaultArrangementSource,
+      type: sourceType,
+      label: sourceLabel.trim() || defaultArrangementSource.label,
       text: normalizedSourceText,
     };
     const nextOpenStatus = getOpenArrangementStatus(scheduledAt, now);
+    const nextAiSummary = pendingOptimizationSummary.trim();
 
     if (editingArrangement) {
-      updateArrangement(editingArrangement.uid, (arrangement) => ({
-        ...arrangement,
-        title: title.trim(),
-        content: content.trim(),
-        kind,
-        priority,
-        location: normalizedLocation,
-        participants,
-        tags,
-        checklist,
-        completionCriteria: normalizedCompletionCriteria,
-        source: {
-          ...nextSource,
-          label: arrangement.source.label,
-          type: arrangement.source.type,
-          text: normalizedSourceText,
-        },
-        sources: [
-          {
-            ...nextSource,
-            label: arrangement.sources[0]?.label ?? arrangement.source.label,
-            type: arrangement.sources[0]?.type ?? arrangement.source.type,
-          },
-          ...arrangement.sources.slice(1),
-        ],
-        scheduledAt,
-        status:
-          arrangement.status === "todo" || arrangement.status === "expired"
+      const relatedTargets = dedupeArrangementTextList(
+        pendingMergeTargetUids.length > 0
+          ? pendingMergeTargetUids
+          : [editingArrangement.uid]
+      )
+        .map((uid) => arrangements.find((arrangement) => arrangement.uid === uid) ?? null)
+        .filter((arrangement): arrangement is ArrangementItem => Boolean(arrangement));
+      const primaryTarget = relatedTargets[0] ?? editingArrangement;
+      const secondaryTargetUids = new Set(
+        relatedTargets
+          .slice(1)
+          .map((arrangement) => arrangement.uid)
+      );
+      const mergedSources = dedupeArrangementSources([
+        nextSource,
+        ...relatedTargets.flatMap((arrangement) => arrangement.sources),
+      ]);
+      const nextMergeGroupId =
+        relatedTargets.length > 1
+          ? relatedTargets.find((arrangement) => arrangement.mergeGroupId)?.mergeGroupId ??
+            `merge-${now}`
+          : primaryTarget.mergeGroupId;
+      const nextStatus =
+        pendingSuggestedStatus === "completed"
+          ? "completed"
+          : primaryTarget.status === "todo" || primaryTarget.status === "expired"
             ? nextOpenStatus
-            : arrangement.status,
-        updateAt: now,
-      }));
-      setSaveHint("安排已更新");
+            : primaryTarget.status;
+      const nextAiAction = pendingAiAction ?? primaryTarget.aiAction;
+      const nextAiRelatedArrangementTitles =
+        sourceType === "text"
+          ? dedupeArrangementTextList(
+              relatedTargets.map((arrangement) => arrangement.title)
+            )
+          : primaryTarget.aiRelatedArrangementTitles;
+      const nextArrangements = arrangements
+        .filter((arrangement) => !secondaryTargetUids.has(arrangement.uid))
+        .map((arrangement) =>
+          arrangement.uid === primaryTarget.uid
+            ? {
+                ...arrangement,
+                title: title.trim(),
+                content: content.trim(),
+                kind,
+                priority,
+                location: normalizedLocation,
+                participants,
+                tags,
+                checklist,
+                completionCriteria: normalizedCompletionCriteria,
+                source: { ...nextSource },
+                sources: mergedSources,
+                mergeGroupId: nextMergeGroupId,
+                scheduledAt,
+                status: nextStatus,
+                completedAt: nextStatus === "completed" ? now : null,
+                pausedAt: nextStatus === "paused" ? now : null,
+                aiAction: nextAiAction,
+                aiSummary:
+                  sourceType === "text"
+                    ? nextAiSummary || primaryTarget.aiSummary
+                    : primaryTarget.aiSummary,
+                aiRelatedArrangementTitles: nextAiRelatedArrangementTitles,
+                aiProcessedAt:
+                  sourceType === "text"
+                    ? now
+                    : primaryTarget.aiProcessedAt,
+                updateAt: now,
+              }
+            : arrangement
+        );
+      persistNextArrangements(nextArrangements);
+      setSaveHint(
+        pendingSuggestedStatus === "completed"
+          ? "\u5df2\u6309 AI \u5efa\u8bae\u66f4\u65b0\u5b89\u6392\u72b6\u6001\uff0c\u8bf7\u5728\u5217\u8868\u4e2d\u7ee7\u7eed\u786e\u8ba4\u3002"
+          : relatedTargets.length > 1
+            ? "\u5df2\u6839\u636e AI \u5efa\u8bae\u5408\u5e76\u5e76\u91cd\u65b0\u89c4\u5212\u76f8\u5173\u5b89\u6392\u3002"
+            : "\u5df2\u6839\u636e AI \u5efa\u8bae\u66f4\u65b0\u539f\u6709\u5b89\u6392\u3002"
+      );
     } else {
       const nextArrangement: ArrangementItem = {
         uid: `arrangement-${now}-${Math.random().toString(36).slice(2, 8)}`,
@@ -3248,11 +4079,15 @@ function ArrangementsPreview() {
         status: nextOpenStatus,
         completedAt: null,
         pausedAt: null,
+        aiAction: sourceType === "text" ? pendingAiAction ?? "create" : null,
+        aiSummary: sourceType === "text" ? nextAiSummary : "",
+        aiRelatedArrangementTitles: [],
+        aiProcessedAt: sourceType === "text" ? now : null,
         createAt: now,
         updateAt: now,
       };
       persistNextArrangements([nextArrangement, ...arrangements]);
-      setSaveHint("已保存到本机");
+      setSaveHint("\u5b89\u6392\u5df2\u4fdd\u5b58\u5230\u5217\u8868\u3002");
     }
 
     resetForm();
@@ -3268,6 +4103,50 @@ function ArrangementsPreview() {
       pausedAt: status === "paused" ? now : null,
       updateAt: now,
     }));
+  };
+
+  const deleteArrangement = (uid: string) => {
+    if (typeof window !== "undefined") {
+      const target = arrangements.find((arrangement) => arrangement.uid === uid);
+      const confirmed = window.confirm(
+        target
+          ? "确认删除“" + target.title + "”吗？删除后无法恢复。"
+          : "确认删除这条安排吗？"
+      );
+      if (!confirmed) return;
+    }
+
+    const nextArrangements = arrangements.filter((arrangement) => arrangement.uid !== uid);
+    persistNextArrangements(nextArrangements);
+    if (activeArrangementId === uid) {
+      setActiveArrangementId(null);
+    }
+    if (editingArrangementId === uid) {
+      resetForm();
+      setShowForm(false);
+    }
+    setSaveHint("安排已删除");
+  };
+
+  const handleAiRecognize = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!canSubmitAiRecognition || !hasReadyAiConfig) return;
+
+    setAiLoading(true);
+    setAiError("");
+    setAiResult(null);
+    try {
+      const enhancedResult = await recognizeArrangementFromText(
+        aiConfig,
+        aiInputText.trim(),
+        arrangements
+      );
+      setAiResult(enhancedResult);
+    } catch (error) {
+      setAiError(error instanceof Error ? error.message : "璇嗗埆澶辫触锛岃绋嶅悗閲嶈瘯");
+    } finally {
+      setAiLoading(false);
+    }
   };
 
   if (activeArrangement) {
@@ -3312,6 +4191,44 @@ function ArrangementsPreview() {
         onComplete={() => changeStatus(activeArrangement.uid, "completed")}
         onPause={() => changeStatus(activeArrangement.uid, "paused")}
         onRestore={() => changeStatus(activeArrangement.uid, "todo")}
+        onDelete={() => deleteArrangement(activeArrangement.uid)}
+        relatedArrangementTitles={activeArrangement.aiRelatedArrangementTitles.filter(
+          (title) => title !== activeArrangement.title
+        )}
+      />
+    );
+  }
+
+  if (showAiRecognizer) {
+    return (
+      <ArrangementAiRecognizerView
+        aiConfig={aiConfig}
+        inputText={aiInputText}
+        result={aiResult}
+        errorMessage={aiError}
+        isLoading={aiLoading}
+        canSubmit={canSubmitAiRecognition}
+        isConfigured={hasReadyAiConfig}
+        canCreateDraft={Boolean(aiResult)}
+        targetArrangementTitles={aiResultTargetTitles}
+        onBack={() => {
+          setShowAiRecognizer(false);
+          resetAiRecognizer();
+        }}
+        onCreateDraft={() => {
+          if (!aiResult) return;
+          if (
+            aiResult.action === "create" ||
+            (!aiResult.targetUid && aiResult.targetUids.length === 0)
+          ) {
+            openAiDraftForm(aiResult, aiInputText.trim());
+          } else {
+            openAiOptimizationForm(aiResult, aiInputText.trim());
+          }
+        }}
+        onOpenSettings={onOpenAiSettings}
+        onInputChange={setAiInputText}
+        onSubmit={handleAiRecognize}
       />
     );
   }
@@ -3320,7 +4237,13 @@ function ArrangementsPreview() {
     return (
       <div className="flex h-full flex-col bg-bg">
         <ArrangementPageHeader
-          title={"\u6dfb\u52a0\u5b89\u6392"}
+          title={
+            editingArrangement
+              ? "\u7f16\u8f91\u5b89\u6392"
+              : sourceType === "text"
+                ? "\u786e\u8ba4\u8349\u7a3f"
+                : "\u6dfb\u52a0\u5b89\u6392"
+          }
           onBack={() => {
             setShowForm(false);
             resetForm();
@@ -3338,6 +4261,40 @@ function ArrangementsPreview() {
         />
         <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-5 pt-2">
           <article className="rounded-[12px] border border-[var(--record-card-border)] bg-[var(--record-card-bg)] px-3 py-4 shadow-[var(--mine-card-shadow)]">
+            {sourceType === "text" && (
+              <div className="mb-3 rounded-[12px] bg-primary-soft px-3 py-3 text-sm leading-6 text-primary">
+                <p>
+                  {saveHint ||
+                    "\u8fd9\u662f\u4e00\u6761\u7531 AI \u6587\u672c\u8bc6\u522b\u751f\u6210\u7684\u5b89\u6392\u8349\u7a3f\uff0c\u4fdd\u5b58\u524d\u53ef\u4ee5\u7ee7\u7eed\u4fee\u6539\u3002"}
+                </p>
+                {pendingOptimizationSummary && (
+                  <p className="mt-1 text-xs leading-5 text-primary/80">
+                    {pendingOptimizationSummary}
+                  </p>
+                )}
+                {pendingMergeTargets.length > 0 && (
+                  <div className="mt-2">
+                    <p className="text-xs leading-5 text-primary/80">
+                      {pendingSuggestedStatus === "completed"
+                        ? "AI 当前关联到的安排："
+                        : pendingMergeTargets.length > 1
+                          ? "AI 建议联动处理的安排："
+                          : "AI 当前关联到的原有安排："}
+                    </p>
+                    <div className="mt-1 flex flex-wrap gap-1.5">
+                      {pendingMergeTargets.map((item) => (
+                        <span
+                          key={item.uid}
+                          className="rounded-full bg-white/70 px-2.5 py-1 text-[11px] font-medium leading-4 text-primary"
+                        >
+                          {item.title}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
             <ArrangementForm
               formId="arrangement-create-form"
               title={title}
@@ -3379,7 +4336,30 @@ function ArrangementsPreview() {
 
   return (
     <div className="flex h-full flex-col bg-bg">
-      <ArrangementPageHeader title={"\u5b89\u6392"} />
+      <ArrangementPageHeader
+        title={"\u5b89\u6392"}
+        rightAction={
+          <button
+            type="button"
+            className="flex h-10 w-10 items-center justify-center rounded-full text-text transition hover:bg-hover-overlay active:scale-[0.96]"
+            onClick={openCreateForm}
+            aria-label={"\u624b\u52a8\u6dfb\u52a0\u5b89\u6392"}
+          >
+            <svg
+              className="h-5 w-5"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+          </button>
+        }
+      />
       <header className="hidden">
         <div className="min-w-0">
           <h1 className="truncate text-lg font-semibold text-text">安排</h1>
@@ -3394,9 +4374,9 @@ function ArrangementsPreview() {
           <section className="rounded-[12px] border border-[var(--record-card-border)] bg-[var(--record-card-bg)] px-3 py-3 shadow-[var(--mine-card-shadow)]">
             <div className="flex items-center justify-between">
               <div className="min-w-0">
-                <p className="text-[15px] font-semibold leading-5 text-text">添加安排</p>
+                <p className="text-[15px] font-semibold leading-5 text-text">快速新建安排</p>
                 <p className="mt-1 truncate text-xs leading-4 text-text-tertiary">
-                  填写标题、内容和时间
+                  先补充标题、内容和时间
                 </p>
               </div>
             </div>
@@ -3455,6 +4435,7 @@ function ArrangementsPreview() {
               <ArrangementCard
                 key={arrangement.uid}
                 arrangement={arrangement}
+                now={nowTick}
                 onOpen={() => setActiveArrangementId(arrangement.uid)}
               />
             ))}
@@ -3479,37 +4460,24 @@ function ArrangementsPreview() {
                 </svg>
               </div>
               <h2 className="mt-4 text-[15px] font-semibold leading-5 text-text">
-                还没有安排
-              </h2>
+                还没有安排              </h2>
               <p className="mt-2 text-xs leading-5 text-text-muted">
-                点击上方的新建安排，先录入标题、内容和时间。
-              </p>
+                点击下方文字输入，或使用右上角按钮手动添加安排。              </p>
             </div>
           </section>
         ) : null}
       </div>
       {!showForm && (
-        <div className="shrink-0 bg-bg px-3 pb-4 pt-2">
-          <button
-            type="button"
-            className="flex h-12 w-full items-center justify-center rounded-[12px] bg-primary text-[15px] font-semibold text-on-primary shadow-[var(--mine-card-shadow)] transition active:scale-[0.98]"
-            onClick={openCreateForm}
-          >
-            <svg
-              className="mr-2 h-5 w-5"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
-              <path d="M12 5v14M5 12h14" />
-            </svg>
-            添加安排
-          </button>
-        </div>
+        <ChatInput
+          onSubmit={createAiDraftFromInput}
+          onVoiceSubmit={() => {
+            setSaveHint("\u8bed\u97f3\u8bc6\u522b\u5c06\u4f5c\u4e3a\u540e\u7eed\u6269\u5c55\u63a5\u5165\uff0c\u5f53\u524d\u8bf7\u5148\u4f7f\u7528\u6587\u5b57\u8f93\u5165\u3002");
+          }}
+          idleLabel="单击文字，长按语音"
+          textPlaceholder="输入安排内容，例如：下周一晚上约大家吃饭"
+          isSubmitting={aiLoading}
+          submittingLabel="正在识别安排..."
+        />
       )}
     </div>
   );
@@ -3581,7 +4549,7 @@ function ArrangementForm({
       return;
     }
 
-    onScheduledTimeChange(`${nextDate}T${nextTime || "09:00"}`);
+    onScheduledTimeChange(nextDate + "T" + (nextTime || "09:00"));
   };
   const applyQuickTime = (timestamp: number) => {
     onScheduledTimeChange(toDateTimeLocalValue(timestamp));
@@ -3783,11 +4751,29 @@ function ArrangementForm({
 
 function ArrangementCard({
   arrangement,
+  now,
   onOpen,
 }: {
   arrangement: ArrangementItem;
+  now: number;
   onOpen: () => void;
 }) {
+  const countdownLabel = formatArrangementCountdown(arrangement.scheduledAt, now);
+  const countdownClass = getArrangementCountdownClass(
+    arrangement.status,
+    arrangement.priority,
+    arrangement.scheduledAt,
+    now
+  );
+  const showKind = shouldShowArrangementKind(arrangement.kind);
+  const showPriority = shouldShowArrangementPriority(arrangement.priority);
+  const showLocation = arrangement.location.trim().length > 0;
+  const metadataTags = [
+    showKind ? getArrangementKindLabel(arrangement.kind) : null,
+    showPriority ? getArrangementPriorityLabel(arrangement.priority) : null,
+    showLocation ? arrangement.location : null,
+  ].filter((item): item is string => Boolean(item)).slice(0, 3);
+
   return (
     <button
       type="button"
@@ -3809,37 +4795,40 @@ function ArrangementCard({
             />
             <h2
               className={cn(
-                "min-w-0 truncate text-[15px] font-semibold leading-5 text-text",
+                "min-w-0 truncate text-[17px] font-semibold leading-6 text-text",
                 arrangement.status === "completed" && "line-through decoration-text-tertiary"
               )}
             >
               {arrangement.title}
             </h2>
           </div>
-          <p className="mt-2 line-clamp-2 text-xs leading-5 text-text-muted">
+          <p className="mt-1.5 line-clamp-2 text-[14px] leading-5 text-text">
             {arrangement.content}
           </p>
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
-            <span className="rounded-full bg-surface-subtle px-2 py-0.5 text-[11px] leading-4 text-text-tertiary">
-              {getArrangementKindLabel(arrangement.kind)}
-            </span>
-            <span
-              className={cn(
-                "rounded-full px-2 py-0.5 text-[11px] font-medium leading-4",
-                getArrangementPriorityPillClass(arrangement.priority)
-              )}
-            >
-              {getArrangementPriorityLabel(arrangement.priority)}
-            </span>
-            {arrangement.location && (
-              <span className="max-w-[112px] truncate rounded-full bg-surface-subtle px-2 py-0.5 text-[11px] leading-4 text-text-tertiary">
-                {arrangement.location}
-              </span>
-            )}
+            {metadataTags.map((tag) => {
+              const isPriorityTag =
+                showPriority && tag === getArrangementPriorityLabel(arrangement.priority);
+              return (
+                <span
+                  key={tag}
+                  className={cn(
+                    "max-w-[140px] truncate rounded-full px-2.5 py-1 text-[12px] leading-4",
+                    isPriorityTag
+                      ? getArrangementPriorityPillClass(arrangement.priority)
+                      : "bg-surface-subtle text-text-tertiary"
+                  )}
+                >
+                  {tag}
+                </span>
+              );
+            })}
           </div>
-          <p className="mt-2 text-xs leading-4 text-text-tertiary">
-            {formatArrangementDateTime(arrangement.scheduledAt)}
-          </p>
+          {countdownLabel && (
+            <p className={cn("mt-2 text-[13px] font-semibold leading-5", countdownClass)}>
+              {countdownLabel}
+            </p>
+          )}
         </div>
         <span className={cn(
           "shrink-0 rounded-full px-2.5 py-1 text-xs font-medium leading-4",
@@ -3898,6 +4887,7 @@ function ArrangementPageHeader({
 
 function ArrangementDetailView({
   arrangement,
+  relatedArrangementTitles,
   isEditing,
   title,
   content,
@@ -3929,8 +4919,10 @@ function ArrangementDetailView({
   onComplete,
   onPause,
   onRestore,
+  onDelete,
 }: {
   arrangement: ArrangementItem;
+  relatedArrangementTitles: string[];
   isEditing: boolean;
   title: string;
   content: string;
@@ -3962,6 +4954,7 @@ function ArrangementDetailView({
   onComplete: () => void;
   onPause: () => void;
   onRestore: () => void;
+  onDelete: () => void;
 }) {
   return (
     <div className="flex h-full flex-col bg-bg">
@@ -4129,11 +5122,27 @@ function ArrangementDetailView({
                   value={
                     arrangement.sources
                       .map((source) =>
-                        source.text ? `${source.label}\uff1a${source.text}` : source.label
+                        source.text ? source.label + "：" + source.text : source.label
                       )
-                      .join("\uff1b")
+                      .join("；")
                   }
                 />
+                {arrangement.aiAction && (
+                  <ArrangementDetailRow
+                    label="AI处理"
+                    value={
+                      arrangement.aiSummary
+                        ? `${getArrangementAiActionLabel(arrangement.aiAction)}：${arrangement.aiSummary}`
+                        : getArrangementAiActionLabel(arrangement.aiAction)
+                    }
+                  />
+                )}
+                {relatedArrangementTitles.length > 0 && (
+                  <ArrangementDetailRow
+                    label="关联安排"
+                    value={formatArrangementTextList(relatedArrangementTitles)}
+                  />
+                )}
                 <ArrangementDetailRow
                   label="创建时间"
                   value={formatArrangementDateTime(arrangement.createAt)}
@@ -4160,20 +5169,20 @@ function ArrangementDetailView({
         </article>
 
         {!isEditing && (
-          <section className="mt-3 grid grid-cols-3 gap-2">
+          <section className="mt-3 grid grid-cols-2 gap-2">
             <button
               type="button"
               className="h-11 rounded-[10px] bg-primary text-sm font-semibold text-on-primary transition active:scale-[0.97] disabled:opacity-35"
               onClick={arrangement.status === "completed" ? onRestore : onComplete}
             >
-              {arrangement.status === "completed" ? "恢复" : "完成"}
+              {arrangement.status === "completed" ? "恢复待处理" : "完成安排"}
             </button>
             <button
               type="button"
               className="h-11 rounded-[10px] bg-surface text-sm font-medium text-text transition active:scale-[0.97] disabled:opacity-35"
               onClick={arrangement.status === "paused" ? onRestore : onPause}
             >
-              {arrangement.status === "paused" ? "恢复" : "暂缓"}
+              {arrangement.status === "paused" ? "恢复待处理" : "暂缓处理"}
             </button>
             <button
               type="button"
@@ -4181,6 +5190,13 @@ function ArrangementDetailView({
               onClick={onEdit}
             >
               编辑
+            </button>
+            <button
+              type="button"
+              className="h-11 rounded-[10px] bg-rose-50 text-sm font-medium text-rose-700 transition active:scale-[0.97] dark:bg-rose-950/50 dark:text-rose-300"
+              onClick={onDelete}
+            >
+              删除
             </button>
           </section>
         )}
@@ -4198,230 +5214,243 @@ function ArrangementDetailRow({ label, value }: { label: string; value: string }
   );
 }
 
-function ArrangementsPreviewLegacy() {
-  const [arrangements, setArrangements] = React.useState(getInitialArrangements);
-  const [showForm, setShowForm] = React.useState(false);
-  const [title, setTitle] = React.useState("");
-  const [content, setContent] = React.useState("");
-  const [scheduledTime, setScheduledTime] = React.useState("");
-  const [saveHint, setSaveHint] = React.useState("");
-  const countLabel = `${arrangements.length} 条`;
-  const canSubmit = title.trim().length > 0 && content.trim().length > 0;
-
-  const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!canSubmit) return;
-
-    const now = Date.now();
-    const nextArrangement: ArrangementItem = {
-      uid: `arrangement-${now}-${Math.random().toString(36).slice(2, 8)}`,
-      title: title.trim(),
-      content: content.trim(),
-      kind: "task",
-      priority: "normal",
-      location: "",
-      participants: [],
-      tags: [],
-      checklist: [],
-      completionCriteria: "",
-      source: defaultArrangementSource,
-      sources: [defaultArrangementSource],
-      mergeGroupId: null,
-      scheduledAt: scheduledTime ? new Date(scheduledTime).getTime() : null,
-      status: "todo",
-      completedAt: null,
-      pausedAt: null,
-      createAt: now,
-      updateAt: now,
-    };
-    const nextArrangements = [nextArrangement, ...arrangements];
-
-    setArrangements(nextArrangements);
-    persistArrangements(nextArrangements);
-    setTitle("");
-    setContent("");
-    setScheduledTime("");
-    setShowForm(false);
-    setSaveHint("已保存到本机");
-  };
+function ArrangementAiRecognizerView({
+  aiConfig,
+  inputText,
+  result,
+  targetArrangementTitles,
+  errorMessage,
+  isLoading,
+  canSubmit,
+  isConfigured,
+  canCreateDraft,
+  onBack,
+  onCreateDraft,
+  onOpenSettings,
+  onInputChange,
+  onSubmit,
+}: {
+  aiConfig: ArrangementAiConfig;
+  inputText: string;
+  result: ArrangementAiRecognitionResult | null;
+  targetArrangementTitles: string[];
+  errorMessage: string;
+  isLoading: boolean;
+  canSubmit: boolean;
+  isConfigured: boolean;
+  canCreateDraft: boolean;
+  onBack: () => void;
+  onCreateDraft: () => void;
+  onOpenSettings: () => void;
+  onInputChange: (value: string) => void;
+  onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
+}) {
+  const actionLabel =
+    result?.action === "complete"
+      ? "\u5efa\u8bae\u6807\u8bb0\u5b8c\u6210"
+      : result?.action === "merge"
+        ? "\u5efa\u8bae\u5408\u5e76\u4e0e\u91cd\u65b0\u89c4\u5212"
+        : result?.action === "update"
+          ? "\u5efa\u8bae\u66f4\u65b0\u539f\u6709\u5b89\u6392"
+          : "\u65b0\u5efa\u5b89\u6392\u8349\u7a3f";
 
   return (
     <div className="flex h-full flex-col bg-bg">
-      <header className="flex h-14 shrink-0 items-center justify-between bg-bg px-4">
-        <div className="min-w-0">
-          <h1 className="truncate text-lg font-semibold text-text">安排</h1>
-          <p className="mt-0.5 truncate text-xs leading-4 text-text-muted">
-            把接下来要落地的事情放在这里
-          </p>
-        </div>
-        <button
-          type="button"
-          className="ml-3 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary text-on-primary shadow-[var(--mine-card-shadow)] transition active:scale-[0.94]"
-          onClick={() => {
-            setShowForm(true);
-            setSaveHint("");
-          }}
-          aria-label="新建安排"
-        >
-          <svg
-            width="19"
-            height="19"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
+      <ArrangementPageHeader
+        title="\u0041\u0049\u6587\u672c\u8bc6\u522b"
+        onBack={onBack}
+        rightAction={
+          <button
+            type="submit"
+            form="arrangement-ai-form"
+            disabled={!canSubmit || !isConfigured}
+            className="flex h-10 min-w-10 items-center justify-center rounded-full px-3 text-sm font-semibold text-primary transition hover:bg-hover-overlay active:scale-[0.96] disabled:opacity-35"
           >
-            <path d="M12 5v14M5 12h14" />
-          </svg>
-        </button>
-      </header>
+            {isLoading ? "\u8bc6\u522b\u4e2d" : "\u5f00\u59cb\u8bc6\u522b"}
+          </button>
+        }
+      />
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-5 pt-2">
-        <section className="rounded-[12px] border border-[var(--record-card-border)] bg-[var(--record-card-bg)] px-3 py-3 shadow-[var(--mine-card-shadow)]">
-          <div className="flex items-center justify-between">
+        {!isConfigured && (
+          <section className="mb-3 rounded-[12px] border border-amber-200 bg-amber-50/80 px-3 py-3 text-sm leading-5 text-amber-800 shadow-[var(--mine-card-shadow)]">
+            <p className="font-semibold">{"\u8bf7\u5148\u5728\u8bbe\u7f6e\u4e2d\u5b8c\u6210 AI \u6a21\u578b\u914d\u7f6e"}</p>
+            <p className="mt-1 text-xs leading-5 text-amber-700">
+              {"\u8bf7\u586b\u5199 Base URL\u3001Model \u548c API Key\uff0c\u7136\u540e\u518d\u8fdb\u884c\u6587\u672c\u8bc6\u522b\u3002"}
+            </p>
+            <button
+              type="button"
+              className="mt-3 flex h-10 items-center rounded-full bg-amber-100 px-3 text-sm font-semibold text-amber-800 transition active:scale-[0.98]"
+              onClick={onOpenSettings}
+            >
+              {"\u53bb\u8bbe\u7f6e"}
+            </button>
+          </section>
+        )}
+
+        <section className="rounded-[12px] border border-[var(--record-card-border)] bg-[var(--record-card-bg)] px-3 py-4 shadow-[var(--mine-card-shadow)]">
+          <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <p className="text-[15px] font-semibold leading-5 text-text">待安排</p>
-              <p className="mt-1 truncate text-xs leading-4 text-text-tertiary">
-                先从一条手动安排开始
+              <h2 className="text-[15px] font-semibold leading-5 text-text">{"\u8f93\u5165\u539f\u59cb\u6587\u672c"}</h2>
+              <p className="mt-1 text-xs leading-5 text-text-tertiary">
+                {"\u628a\u4e8b\u60c5\u539f\u6837\u8f93\u5165\u7ed9 AI\uff0c\u5b83\u4f1a\u8bc6\u522b\u5b89\u6392\u7684\u6807\u9898\u3001\u65f6\u95f4\u3001\u5730\u70b9\u3001\u7c7b\u578b\u3001\u91cd\u8981\u6027\uff0c\u5e76\u5224\u65ad\u662f\u5426\u5e94\u8be5\u5408\u5e76\u3001\u66f4\u65b0\u6216\u5b8c\u6210\u65e2\u6709\u5b89\u6392\u3002"}
               </p>
             </div>
-            <span className="ml-3 shrink-0 rounded-full bg-primary-soft px-2.5 py-1 text-xs font-medium leading-4 text-primary">
-              {countLabel}
+            <span className="shrink-0 rounded-full bg-primary-soft px-2.5 py-1 text-[11px] font-semibold text-primary">
+              {aiConfig.model || "\u672a\u9009\u62e9\u6a21\u578b"}
             </span>
           </div>
 
-          {showForm ? (
-            <form className="mt-4 space-y-3" onSubmit={handleSubmit}>
-              <label className="block">
-                <span className="text-xs font-medium leading-4 text-text-muted">标题</span>
-                <input
-                  value={title}
-                  onChange={(event) => setTitle(event.target.value)}
-                  placeholder="例如：确认周会材料"
-                  className="mt-1.5 h-11 w-full rounded-[12px] border border-transparent bg-surface px-3 text-[15px] leading-5 text-text outline-none transition placeholder:text-input-placeholder focus:bg-input-bg-focus focus:shadow-[0_0_0_1px_var(--primary-ring),0_0_10px_var(--primary-ring)]"
-                />
-              </label>
-
-              <label className="block">
-                <span className="text-xs font-medium leading-4 text-text-muted">内容</span>
-                <textarea
-                  value={content}
-                  onChange={(event) => setContent(event.target.value)}
-                  placeholder="补充要处理的事项、背景或下一步动作"
-                  rows={3}
-                  className="mt-1.5 block min-h-[92px] w-full resize-none rounded-[12px] border border-transparent bg-surface px-3 py-2.5 text-[15px] leading-6 text-text outline-none transition placeholder:text-input-placeholder focus:bg-input-bg-focus focus:shadow-[0_0_0_1px_var(--primary-ring),0_0_10px_var(--primary-ring)]"
-                />
-              </label>
-
-              <label className="block">
-                <span className="text-xs font-medium leading-4 text-text-muted">时间</span>
-                <input
-                  type="datetime-local"
-                  value={scheduledTime}
-                  onChange={(event) => setScheduledTime(event.target.value)}
-                  className="mt-1.5 h-11 w-full rounded-[12px] border border-transparent bg-surface px-3 text-[15px] leading-5 text-text outline-none transition placeholder:text-input-placeholder focus:bg-input-bg-focus focus:shadow-[0_0_0_1px_var(--primary-ring),0_0_10px_var(--primary-ring)]"
-                />
-              </label>
-
-              <div className="flex items-center justify-end gap-2 pt-1">
-                <button
-                  type="button"
-                  className="h-10 rounded-[10px] px-3 text-sm font-medium text-text-tertiary transition active:scale-[0.97]"
-                  onClick={() => {
-                    setShowForm(false);
-                    setTitle("");
-                    setContent("");
-                    setScheduledTime("");
-                  }}
-                >
-                  取消
-                </button>
-                <button
-                  type="submit"
-                  disabled={!canSubmit}
-                  className="h-10 rounded-[10px] bg-primary px-4 text-sm font-semibold text-on-primary transition active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-35"
-                >
-                  保存
-                </button>
-              </div>
-            </form>
-          ) : (
-            <button
-              type="button"
-              className="mt-4 flex min-h-[48px] w-full items-center rounded-[10px] bg-surface-subtle px-3 text-left transition active:scale-[0.99]"
-              onClick={() => {
-                setShowForm(true);
-                setSaveHint("");
-              }}
-            >
-              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary-soft text-primary">
-                <svg
-                  width="15"
-                  height="15"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  aria-hidden="true"
-                >
-                  <path d="M12 5v14M5 12h14" />
-                </svg>
-              </span>
-              <span className="ml-2 min-w-0 flex-1">
-                <span className="block text-sm font-medium leading-5 text-text">新建安排</span>
-                <span className="block truncate text-xs leading-4 text-text-tertiary">
-                  标题、内容和时间会保存到本机
-                </span>
-              </span>
-            </button>
-          )}
-
-          {saveHint && (
-            <p className="mt-3 rounded-[10px] bg-primary-soft px-3 py-2 text-xs leading-4 text-primary">
-              {saveHint}，后续步骤会完善列表卡片和详情页。
-            </p>
-          )}
+          <form id="arrangement-ai-form" className="mt-4" onSubmit={onSubmit}>
+            <label className="block">
+              <span className="mb-1.5 block text-sm font-medium text-text">{"\u539f\u59cb\u6587\u672c"}</span>
+              <textarea
+                value={inputText}
+                onChange={(event) => onInputChange(event.target.value)}
+                rows={6}
+                placeholder="\u4f8b\u5982\uff1a\u4e0b\u5468\u4e00\u665a\u4e0a\u8bf7\u7814\u4e00\u548c\u7814\u4e8c\u7684\u540c\u5b66\u4e00\u8d77\u5403\u996d\uff0c\u987a\u4fbf\u8c03\u7814\u4e00\u4e0b\u5019\u9009\u9910\u5385\u3002"
+                className="w-full rounded-[12px] border border-border bg-bg px-3 py-3 text-sm leading-6 text-text outline-none transition placeholder:text-text-disabled focus:border-primary focus:ring-2 focus:ring-primary/15"
+              />
+            </label>
+          </form>
         </section>
 
-        <section className="mt-3 flex min-h-[256px] items-center justify-center rounded-[12px] border border-dashed border-border bg-surface px-7 text-center">
-          <div>
-            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-primary-soft text-primary">
-              <svg
-                width="24"
-                height="24"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
+        {errorMessage && (
+          <p className="mt-3 rounded-[10px] bg-rose-50 px-3 py-2 text-xs leading-5 text-rose-700">
+            {errorMessage}
+          </p>
+        )}
+
+        {result && (
+          <section className="mt-3 rounded-[12px] border border-[var(--record-card-border)] bg-[var(--record-card-bg)] px-3 py-4 shadow-[var(--mine-card-shadow)]">
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-[15px] font-semibold leading-5 text-text">{"\u8bc6\u522b\u7ed3\u679c"}</h2>
+              <span
+                className={cn(
+                  "rounded-full px-2.5 py-1 text-[11px] font-semibold",
+                  result.confidence === "high"
+                    ? "bg-emerald-100 text-emerald-700"
+                    : result.confidence === "low"
+                      ? "bg-rose-100 text-rose-700"
+                      : "bg-amber-100 text-amber-700"
+                )}
               >
-                <path d="M8 7h8M8 12h5M8 17h4" />
-                <path d="M6 3h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" />
-              </svg>
+                {result.confidence === "high"
+                  ? "\u9ad8\u7f6e\u4fe1"
+                  : result.confidence === "low"
+                    ? "\u4f4e\u7f6e\u4fe1"
+                    : "\u4e2d\u7b49\u7f6e\u4fe1"}
+              </span>
             </div>
-            <h2 className="mt-4 text-[15px] font-semibold leading-5 text-text">
-              {arrangements.length > 0 ? "安排已保存" : "还没有安排"}
-            </h2>
-            <p className="mt-2 text-xs leading-5 text-text-muted">
-              {arrangements.length > 0
-                ? "当前已完成手动创建和本地保存。列表卡片、详情页会在下一步接入。"
-                : "点击上方的新建安排，先录入标题、内容和时间。"}
-            </p>
-          </div>
-        </section>
+
+            <div className="mt-3 flex flex-wrap gap-2">
+              <span className="rounded-full bg-primary-soft px-2.5 py-1 text-[11px] font-semibold text-primary">
+                {actionLabel}
+              </span>
+              {result.targetUid && (
+                <span className="rounded-full bg-[var(--record-card-secondary-bg)] px-2.5 py-1 text-[11px] font-semibold text-text-secondary">
+                  {"目标安排：" + (targetArrangementTitles[0] || result.targetUid)}
+                </span>
+              )}
+              {targetArrangementTitles.length > 1 && (
+                <span className="rounded-full bg-[var(--record-card-secondary-bg)] px-2.5 py-1 text-[11px] font-semibold text-text-secondary">
+                  {"候选合并：" + targetArrangementTitles.join("、")}
+                </span>
+              )}
+            </div>
+
+            <div className="mt-3 space-y-3">
+              <ArrangementDetailRow label="\u6807\u9898" value={result.title} />
+              <ArrangementDetailRow label="\u5185\u5bb9" value={result.content} />
+              <ArrangementDetailRow label="\u7c7b\u578b" value={getArrangementKindLabel(result.kind)} />
+              <ArrangementDetailRow
+                label="\u91cd\u8981\u6027"
+                value={getArrangementPriorityLabel(result.priority)}
+              />
+              <ArrangementDetailRow
+                label="\u65f6\u95f4"
+                value={result.scheduledAtText || "\u672a\u8bc6\u522b\u5230\u660e\u786e\u65f6\u95f4"}
+              />
+              <ArrangementDetailRow
+                label="\u5730\u70b9"
+                value={result.location || "\u672a\u8bc6\u522b\u5230\u660e\u786e\u5730\u70b9"}
+              />
+              <ArrangementDetailRow
+                label="\u53c2\u4e0e\u4eba"
+                value={
+                  result.participants.length > 0
+                    ? formatArrangementTextList(result.participants)
+                    : "\u672a\u8bc6\u522b\u5230\u53c2\u4e0e\u4eba"
+                }
+              />
+              <ArrangementDetailRow
+                label="\u6807\u7b7e"
+                value={
+                  result.tags.length > 0 ? formatArrangementTextList(result.tags) : "\u672a\u8bc6\u522b\u5230\u6807\u7b7e"
+                }
+              />
+              <ArrangementDetailRow
+                label="\u5b8c\u6210\u6807\u51c6"
+                value={result.completionCriteria || "\u672a\u8bc6\u522b\u5230\u5b8c\u6210\u6807\u51c6"}
+              />
+              <ArrangementDetailRow
+                label="\u8bc6\u522b\u8bf4\u660e"
+                value={result.notes || "\u65e0\u989d\u5916\u8bf4\u660e"}
+              />
+              {result.optimizationSummary && (
+                <ArrangementDetailRow
+                  label="\u4f18\u5316\u5efa\u8bae"
+                  value={result.optimizationSummary}
+                />
+              )}
+            </div>
+            <div className="mt-4 flex justify-end">
+              <button
+                type="button"
+                disabled={!canCreateDraft}
+                className="h-10 rounded-[10px] bg-primary px-4 text-sm font-semibold text-on-primary transition active:scale-[0.97] disabled:opacity-35"
+                onClick={onCreateDraft}
+              >
+                {"\u751f\u6210\u8349\u7a3f"}
+              </button>
+            </div>
+          </section>
+        )}
       </div>
     </div>
   );
 }
+function ArrangementTextField({
+  label,
+  placeholder,
+  value,
+  onChange,
+  autoCapitalize,
+  type = "text",
+}: {
+  label: string;
+  placeholder: string;
+  value: string;
+  onChange: (value: string) => void;
+  autoCapitalize?: string;
+  type?: React.HTMLInputTypeAttribute;
+}) {
+  return (
+    <label className="block">
+      <span className="mb-1.5 block text-sm font-medium text-text">{label}</span>
+      <input
+        type={type}
+        value={value}
+        autoCapitalize={autoCapitalize}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        className="h-11 w-full rounded-[12px] border border-border bg-bg px-3 text-sm text-text outline-none transition placeholder:text-text-disabled focus:border-primary focus:ring-2 focus:ring-primary/15"
+      />
+    </label>
+  );
+}
 
-void ArrangementsPreviewLegacy;
+
 
 function InsightPreview() {
   const { t } = usePreferences();
@@ -4553,7 +5582,7 @@ function MinePreview({
 
         <div className="relative z-10 overflow-hidden rounded-[12px] border border-[var(--mine-card-border)] bg-[var(--mine-card-bg)] shadow-[var(--mine-card-shadow)]">
           <img
-            src={`${mineImagePrefix}image_mine_page_migong_background.png`}
+            src={mineImagePrefix + "image_mine_page_migong_background.png"}
             alt=""
             className="pointer-events-none absolute -right-px bottom-0 h-[179px] w-[179px]"
             aria-hidden="true"
@@ -4588,7 +5617,7 @@ function MinePreview({
           className="relative w-full overflow-hidden rounded-[12px] border border-[var(--mine-card-border)] bg-[var(--mine-card-bg)] text-left shadow-[var(--mine-card-shadow)] transition active:scale-[0.99]"
         >
           <img
-            src={`${mineImagePrefix}image_mine_page_datamanager_protect_background.png`}
+            src={mineImagePrefix + "image_mine_page_datamanager_protect_background.png"}
             alt=""
             className="pointer-events-none absolute -right-px bottom-0 h-24 w-[106px]"
             aria-hidden="true"
@@ -4675,8 +5704,8 @@ function AboutScreen({ onBack }: { onBack: () => void }) {
   ];
   const footerRecords = [
     "ICP备案号：鄂ICP备2024037215号",
-    "增值电信业务经营许可证：鄂B2-20240478",
-    "模型名称：DeepSeek-R1",
+    "澧炲€肩數淇′笟鍔＄粡钀ヨ鍙瘉锛氶剛B2-20240478",
+    "妯″瀷鍚嶇О锛欴eepSeek-R1",
     "互联网信息服务算法备案号：网信算备330110507206401230035号",
     "软著：软著登字第14519261号",
     "森奇思(武汉)科技有限公司",
@@ -4827,12 +5856,19 @@ function MineActionCard({
 function SettingsScreen({
   onBack,
   onOpenAppearance,
+  onOpenArrangementAi,
+  arrangementAiConfig,
 }: {
   onBack: () => void;
   onOpenAppearance: () => void;
+  onOpenArrangementAi: () => void;
+  arrangementAiConfig: ArrangementAiConfig;
 }) {
   const { localeCode, resolvedLocale, t } = usePreferences();
   const [showLanguageSheet, setShowLanguageSheet] = React.useState(false);
+  const aiConfigDescription = isArrangementAiConfigReady(arrangementAiConfig)
+    ? arrangementAiConfig.model + " · 已配置"
+    : "未配置";
 
   return (
     <div className="relative flex h-full flex-col bg-bg">
@@ -4841,17 +5877,22 @@ function SettingsScreen({
       <div className="min-h-0 flex-1 overflow-y-auto px-2.5 py-3">
         <div className="overflow-hidden rounded-[12px] bg-surface">
           <SettingsListItem
+            title="AI 妯″瀷"
+            description={aiConfigDescription}
+            onClick={onOpenArrangementAi}
+          />
+          <SettingsListItem
             title={t("settings.appearance")}
             description={t("settings.appearanceDesc")}
             onClick={onOpenAppearance}
           />
           <SettingsListItem
             title={t("settings.language")}
-            description={`${t("settings.current")}：${
+            description={t("settings.current") + "：" + (
               localeCode === ""
                 ? t("settings.followSystem")
                 : getLocaleDisplayName(localeCode, resolvedLocale)
-            }`}
+            )}
             onClick={() => setShowLanguageSheet(true)}
           />
         </div>
@@ -4860,6 +5901,108 @@ function SettingsScreen({
       {showLanguageSheet && (
         <LanguageSheet onClose={() => setShowLanguageSheet(false)} />
       )}
+    </div>
+  );
+}
+
+function ArrangementAiSettingsScreen({
+  config,
+  onBack,
+  onSave,
+}: {
+  config: ArrangementAiConfig;
+  onBack: () => void;
+  onSave: (config: ArrangementAiConfig) => void;
+}) {
+  const [apiKey, setApiKey] = React.useState(config.apiKey);
+  const [baseUrl, setBaseUrl] = React.useState(config.baseUrl);
+  const [model, setModel] = React.useState(config.model);
+  const [saveMessage, setSaveMessage] = React.useState("");
+  const canSave = apiKey.trim().length > 0 && baseUrl.trim().length > 0 && model.trim().length > 0;
+
+  return (
+    <div className="flex h-full flex-col bg-bg">
+      <MobilePageHeader title="AI 模型" onBack={onBack} />
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-5 pt-3">
+        <section className="rounded-[12px] bg-surface px-3 pb-3 pt-3 shadow-[var(--mine-card-shadow)]">
+          <h2 className="text-[15px] font-semibold leading-5 text-text">连接配置</h2>
+          <p className="mt-1 text-xs leading-5 text-text-tertiary">
+            当前版本直接从前端调用兼容 OpenAI Chat Completions 的接口，识别结果仅展示或进入草稿确认，不会自动创建正式安排。          </p>
+
+          <div className="mt-4 space-y-3">
+            <ArrangementTextField
+              label="Base URL"
+              placeholder="https://api.openai.com/v1"
+              value={baseUrl}
+              onChange={setBaseUrl}
+              autoCapitalize="none"
+            />
+            <ArrangementTextField
+              label="Model"
+              placeholder="gpt-4.1-mini"
+              value={model}
+              onChange={setModel}
+              autoCapitalize="none"
+            />
+            <ArrangementTextField
+              label="API Key"
+              placeholder="sk-..."
+              value={apiKey}
+              onChange={(value) => {
+                setApiKey(value);
+                setSaveMessage("");
+              }}
+              autoCapitalize="none"
+              type="password"
+            />
+          </div>
+        </section>
+
+        <section className="mt-3 rounded-[12px] bg-surface px-3 pb-3 pt-3 shadow-[var(--mine-card-shadow)]">
+          <h2 className="text-[15px] font-semibold leading-5 text-text">接口要求</h2>
+          <div className="mt-2 space-y-2 text-xs leading-5 text-text-tertiary">
+            <p>{"需要支持 POST /chat/completions。"}</p>
+            <p>{"返回内容需要包含 choices[0].message.content。"}</p>
+            <p>{"模型需要稳定输出 JSON，否则识别会失败。"}</p>
+          </div>
+        </section>
+        {saveMessage && (
+          <p className="mt-3 rounded-[10px] bg-primary-soft px-3 py-2 text-xs leading-5 text-primary">
+            {saveMessage}
+          </p>
+        )}
+      </div>
+
+      <div className="shrink-0 bg-bg px-3 pb-4 pt-2">
+        <button
+          type="button"
+          disabled={!canSave}
+          className="flex h-12 w-full items-center justify-center rounded-[12px] bg-primary text-[15px] font-semibold text-on-primary shadow-[var(--mine-card-shadow)] transition active:scale-[0.98] disabled:opacity-35"
+          onClick={() => {
+            const nextConfig = normalizeArrangementAiConfig({
+              apiKey,
+              baseUrl,
+              model,
+            });
+            if (!hasOnlyPrintableAscii(nextConfig.apiKey)) {
+               setSaveMessage("API Key 包含异常字符，请重新粘贴纯英文密钥。");
+              return;
+            }
+            onSave(nextConfig);
+            setApiKey(nextConfig.apiKey);
+            setBaseUrl(nextConfig.baseUrl);
+            setModel(nextConfig.model);
+            setSaveMessage(
+              nextConfig.apiKey === apiKey.trim()
+                ? "配置已保存"
+                : "配置已保存，并自动移除了空格或隐藏字符"
+            );
+          }}
+        >
+          保存配置
+        </button>
+      </div>
     </div>
   );
 }
@@ -4957,7 +6100,7 @@ function AppearanceStyleScreen({ onBack }: { onBack: () => void }) {
                     }}
                   />
                   <span className="mt-2 text-xs text-text">
-                    {t(`accent.${option.key}`)}
+                    {t("accent." + option.key)}
                   </span>
                 </button>
               );
@@ -5160,7 +6303,7 @@ function getJiwoLogoSrc(appIcon: AppIcon, resolvedTheme: ResolvedTheme) {
 }
 
 function formatRoundCount(count: number, label: string) {
-  return /^[a-zA-Z]/.test(label) ? `${count} ${label}` : `${count}${label}`;
+  return /^[a-zA-Z]/.test(label) ? count + " " + label : String(count) + label;
 }
 
 function ChevronRightIcon({ className }: { className?: string }) {
@@ -5222,3 +6365,7 @@ function OverviewEntryTag({ label }: { label: string }) {
     </span>
   );
 }
+
+
+
+
