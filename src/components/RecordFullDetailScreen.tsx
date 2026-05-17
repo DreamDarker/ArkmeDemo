@@ -111,7 +111,14 @@ function MainRecordCard({
           className="absolute right-3 top-1 flex h-10 w-10 items-center justify-center rounded-full text-text transition hover:bg-hover-overlay"
           aria-label={t("recordAction.more")}
         >
-          <svg className="h-5 w-5 rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+          <svg
+            className="h-5 w-5 rotate-90"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+          >
             <path d="M12 5h.01M12 12h.01M12 19h.01" />
           </svg>
         </button>
@@ -199,7 +206,9 @@ function ExtendList({
   return (
     <section>
       <h2 className="px-4 pb-1.5 pt-2.5 text-[12px] leading-5 text-text-muted">
-        {t("recordDetail.extendsPrefix")}{items.length}{t("recordDetail.extendsSuffix")}
+        {t("recordDetail.extendsPrefix")}
+        {items.length}
+        {t("recordDetail.extendsSuffix")}
       </h2>
       <div>
         {items.map((item) => (

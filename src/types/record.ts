@@ -5,6 +5,7 @@ export type RecordSourceConversation = {
   label: string;
   actionLabel: string;
   iconLabel: string;
+  conversationType?: "private" | "group";
   entryIndex?: number;
   recordUid?: string;
   identityId?: string;

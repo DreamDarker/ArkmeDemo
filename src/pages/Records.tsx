@@ -23,6 +23,7 @@ type RecordsProps = {
   onOpenSourceConversation?: (source: RecordSourceConversation) => void;
   onOpenRecordDetail?: (record: RecordItem) => void;
   onOpenRecordSnapshot?: (record: RecordItem) => void;
+  onRecognizeAsArrangement?: (record: RecordItem) => void;
 };
 
 function parseAiConversationTimestamp(value: string, fallbackTime: number) {
@@ -52,6 +53,7 @@ export default function Records({
   onOpenSourceConversation,
   onOpenRecordDetail,
   onOpenRecordSnapshot,
+  onRecognizeAsArrangement,
 }: RecordsProps) {
   const { t } = usePreferences();
   const fallbackDemoRecords = useMemo<RecordItem[]>(
@@ -164,6 +166,7 @@ export default function Records({
           onOpenSourceConversation={onOpenSourceConversation}
           onOpenRecordDetail={onOpenRecordDetail}
           onOpenRecordSnapshot={onOpenRecordSnapshot}
+          onRecognizeAsArrangement={onRecognizeAsArrangement}
         />
       ) : (
         <div className="flex flex-1 items-center justify-center">

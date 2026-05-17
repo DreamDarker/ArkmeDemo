@@ -13,6 +13,7 @@ type ChatListProps = {
   onOpenSourceConversation?: (source: RecordSourceConversation) => void;
   onOpenRecordDetail?: (record: RecordItem) => void;
   onOpenRecordSnapshot?: (record: RecordItem) => void;
+  onRecognizeAsArrangement?: (record: RecordItem) => void;
   targetRecordUid?: string | null;
 };
 
@@ -30,6 +31,7 @@ export default function ChatList({
   onOpenSourceConversation,
   onOpenRecordDetail,
   onOpenRecordSnapshot,
+  onRecognizeAsArrangement,
   targetRecordUid,
 }: ChatListProps) {
   const { resolvedLocale, t } = usePreferences();
@@ -148,11 +150,14 @@ export default function ChatList({
             textContent={record.text_content}
             animationDelay={staggerClass}
             disableAnimation={!isNew}
-            onOpenDetail={
-              onOpenRecordDetail ? () => onOpenRecordDetail(record) : undefined
-            }
+            onOpenDetail={undefined}
             onOpenMemorySnapshot={
               onOpenRecordSnapshot ? () => onOpenRecordSnapshot(record) : undefined
+            }
+            onRecognizeAsArrangement={
+              onRecognizeAsArrangement
+                ? () => onRecognizeAsArrangement(record)
+                : undefined
             }
             reference={
               referencedRecord && onOpenRecordDetail

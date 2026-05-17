@@ -67,6 +67,7 @@ const browserNotificationPromptedStorageKey = "arkme-demo.browserNotificationPro
 const createdSelfRecordsStorageKey = "arkme-demo.selfRecords";
 const arrangementsStorageKey = "arkme-demo.arrangements";
 const arrangementAiConfigStorageKey = "arkme-demo.arrangementAiConfig";
+const chatArrangementSettingsStorageKey = "arkme-demo.chatArrangementSettings";
 const searchHistoryStorageKey = "arkme-demo.searchHistory";
 const aiConversationTotalCount = aiConversationLogEntries.length;
 const maxSearchHistoryCount = 4;
@@ -117,6 +118,8 @@ type ArrangementSource = {
   type: ArrangementSourceType;
   label: string;
   text: string;
+  sourceConversation?: RecordSourceConversation;
+  sourceRecord?: RecordReference;
 };
 
 type ArrangementAiConfig = {
@@ -132,6 +135,8 @@ type ArrangementAiRecognitionResult = {
   action: ArrangementAiAction;
   targetUid: string;
   targetUids: string[];
+  shouldCreateDraft: boolean;
+  relevanceReason: string;
   title: string;
   content: string;
   kind: ArrangementKind;
@@ -146,6 +151,43 @@ type ArrangementAiRecognitionResult = {
   notes: string;
   optimizationSummary: string;
   rawResponse: string;
+};
+
+type ArrangementAiConversationContextMessage = {
+  uid: string;
+  speaker: string;
+  text: string;
+  sentAt: number;
+  isTarget: boolean;
+};
+
+type ArrangementAiConversationContext = {
+  conversationType: "private" | "group";
+  conversationTitle: string;
+  conversationSubtitle: string;
+  selfName: string;
+  speakerName: string;
+  memberNames: string[];
+  groupDisplayScope: "selfOnly" | "all";
+  enableAutoComplete: boolean;
+  recentMessages: ArrangementAiConversationContextMessage[];
+};
+
+type ChatArrangementSettings = {
+  groupDisplayScope: "selfOnly" | "all";
+  enableAutoComplete: boolean;
+};
+
+type ArrangementSourceDraftContext = {
+  sourceLabel: string;
+  sourceConversation: RecordSourceConversation | null;
+  sourceRecord: RecordReference | null;
+};
+
+type IncomingArrangementDraft = {
+  record: RecordItem;
+  inputText: string;
+  result: ArrangementAiRecognitionResult;
 };
 
 type ArrangementItem = {
@@ -173,6 +215,26 @@ type ArrangementItem = {
   createAt: number;
   updateAt: number;
 };
+
+type ArrangementFilterState = {
+  status: "all" | ArrangementStatus;
+  priority: "all" | ArrangementPriority;
+  kind: "all" | ArrangementKind;
+  timeRange: "all" | "quarter" | "today" | "week" | "month" | "overdue";
+  selectedDateKeys: string[];
+};
+
+function formatArrangementDateKeyLabel(dateKeys: string[]) {
+  if (dateKeys.length === 0) return "本季度安排";
+  const sortedKeys = [...dateKeys].sort();
+  const first = sortedKeys[0]?.split("-");
+  const last = sortedKeys[sortedKeys.length - 1]?.split("-");
+  if (!first || !last || first.length < 3 || last.length < 3) return "安排";
+  if (sortedKeys.length === 1) {
+    return `${Number(first[1])}月${Number(first[2])}日安排`;
+  }
+  return `${Number(first[1])}月${Number(first[2])}日 - ${Number(last[1])}月${Number(last[2])}日安排`;
+}
 
 type HomeMessagePreview = {
   summary: TestConversationSummary;
@@ -478,6 +540,40 @@ function normalizeStoredArrangement(value: unknown): ArrangementItem | null {
   };
 }
 
+function getInitialChatArrangementSettings(): ChatArrangementSettings {
+  if (typeof window === "undefined") {
+    return {
+      groupDisplayScope: "selfOnly",
+      enableAutoComplete: true,
+    };
+  }
+
+  try {
+    const storedValue = window.localStorage.getItem(chatArrangementSettingsStorageKey);
+    if (!storedValue) {
+      return {
+        groupDisplayScope: "selfOnly",
+        enableAutoComplete: true,
+      };
+    }
+    const parsed = JSON.parse(storedValue) as Partial<ChatArrangementSettings>;
+    return {
+      groupDisplayScope: parsed.groupDisplayScope === "all" ? "all" : "selfOnly",
+      enableAutoComplete: parsed.enableAutoComplete !== false,
+    };
+  } catch {
+    return {
+      groupDisplayScope: "selfOnly",
+      enableAutoComplete: true,
+    };
+  }
+}
+
+function persistChatArrangementSettings(settings: ChatArrangementSettings) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(chatArrangementSettingsStorageKey, JSON.stringify(settings));
+}
+
 const arrangementKindOptions: Array<{ value: ArrangementKind; label: string }> = [
   { value: "task", label: "\u4efb\u52a1" },
   { value: "schedule", label: "\u65e5\u7a0b" },
@@ -529,6 +625,15 @@ function getArrangementAiActionLabel(action: ArrangementAiAction | null) {
   return "";
 }
 
+function getConversationArrangementSourceLabel(
+  source: RecordSourceConversation | null | undefined
+) {
+  if (source?.type !== "test") return "聊天消息识别";
+  if (source.conversationType === "private") return "私聊消息识别";
+  if (source.conversationType === "group") return "群聊消息识别";
+  return "聊天消息识别";
+}
+
 function shouldShowArrangementKind(kind: ArrangementKind) {
   return kind !== "task";
 }
@@ -570,6 +675,7 @@ function normalizeArrangementSource(value: unknown): ArrangementSource {
   const source = value as Partial<ArrangementSource>;
   const type: ArrangementSourceType =
     source.type === "text" || source.type === "conversation" ? source.type : "manual";
+  const sourceRecord = normalizeStoredRecordReference(source.sourceRecord);
 
   return {
     type,
@@ -577,9 +683,13 @@ function normalizeArrangementSource(value: unknown): ArrangementSource {
       typeof source.label === "string" && source.label.trim()
         ? source.label.trim()
         : type === "manual"
-          ? "\u624b\u52a8\u521b\u5efa"
-          : "\u6587\u672c\u8bc6\u522b",
+        ? "\u624b\u52a8\u521b\u5efa"
+        : "\u6587\u672c\u8bc6\u522b",
     text: typeof source.text === "string" ? source.text.trim() : "",
+    ...(source.sourceConversation
+      ? { sourceConversation: source.sourceConversation }
+      : {}),
+    ...(sourceRecord ? { sourceRecord } : {}),
   };
 }
 
@@ -634,6 +744,9 @@ function normalizeArrangementAiRecognitionResult(
         : "create",
     targetUid: typeof result.targetUid === "string" ? result.targetUid.trim() : "",
     targetUids: normalizeArrangementTextList(result.targetUids),
+    shouldCreateDraft: result.shouldCreateDraft !== false,
+    relevanceReason:
+      typeof result.relevanceReason === "string" ? result.relevanceReason.trim() : "",
     title: typeof result.title === "string" && result.title.trim() ? result.title.trim() : fallbackTitle,
     content:
       typeof result.content === "string" && result.content.trim()
@@ -742,6 +855,63 @@ function formatArrangementAiContext(inputText: string, arrangements: Arrangement
     .join("\n");
 }
 
+function toArrangementDateKey(timestamp: number | null) {
+  if (timestamp === null) return null;
+  const date = new Date(timestamp);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function getCurrentQuarterRange(referenceTime: number) {
+  const date = new Date(referenceTime);
+  const quarterStartMonth = Math.floor(date.getMonth() / 3) * 3;
+  const start = new Date(date.getFullYear(), quarterStartMonth, 1).getTime();
+  const end = new Date(date.getFullYear(), quarterStartMonth + 3, 1).getTime();
+  return { start, end };
+}
+
+function getArrangementPriorityWeight(priority: ArrangementPriority) {
+  if (priority === "urgent") return 4;
+  if (priority === "important") return 3;
+  if (priority === "normal") return 2;
+  return 1;
+}
+
+function formatArrangementAiConversationContext(
+  context: ArrangementAiConversationContext | null | undefined
+) {
+  if (!context) {
+    return "No conversation context.";
+  }
+
+  const lines = [
+    `conversationType=${context.conversationType}`,
+    `conversationTitle=${context.conversationTitle || "unknown"}`,
+    context.conversationSubtitle ? `conversationSubtitle=${context.conversationSubtitle}` : "",
+    `selfName=${context.selfName || "我"}`,
+    `speakerName=${context.speakerName || "unknown"}`,
+    `groupDisplayScope=${context.groupDisplayScope}`,
+    `enableAutoComplete=${context.enableAutoComplete ? "true" : "false"}`,
+    context.memberNames.length > 0
+      ? `members=${context.memberNames.join("/")}`
+      : "",
+    "recentMessages:",
+    ...context.recentMessages.map((message, index) =>
+      [
+        `${index + 1}.`,
+        message.isTarget ? "[target]" : "[context]",
+        message.speaker,
+        formatArrangementDateTime(message.sentAt),
+        message.text,
+      ].join(" ")
+    ),
+  ];
+
+  return lines.filter(Boolean).join("\n");
+}
+
 function dedupeArrangementTextList(items: string[]) {
   return Array.from(new Set(items.map((item) => item.trim()).filter(Boolean)));
 }
@@ -749,7 +919,13 @@ function dedupeArrangementTextList(items: string[]) {
 function dedupeArrangementSources(sources: ArrangementSource[]) {
   const seen = new Set<string>();
   return sources.filter((source) => {
-    const key = `${source.type}::${source.label}::${source.text}`;
+    const key = [
+      source.type,
+      source.label,
+      source.text,
+      source.sourceConversation?.conversationId ?? "",
+      source.sourceRecord?.uid ?? "",
+    ].join("::");
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -782,7 +958,8 @@ function extractJsonBlock(text: string) {
 async function recognizeArrangementFromText(
   config: ArrangementAiConfig,
   inputText: string,
-  arrangements: ArrangementItem[]
+  arrangements: ArrangementItem[],
+  conversationContext?: ArrangementAiConversationContext | null
 ): Promise<ArrangementAiRecognitionResult> {
   const normalizedConfig = normalizeArrangementAiConfig(config);
   if (!hasOnlyPrintableAscii(normalizedConfig.apiKey)) {
@@ -815,11 +992,17 @@ async function recognizeArrangementFromText(
               "Choose action=complete when the text strongly indicates one existing arrangement is already finished.",
               "Choose action=merge when the text should cause one or more existing arrangements to be consolidated or replanned together.",
               "Treat same location plus nearby time as a strong merge/replan signal, even if wording differs.",
+              "When conversation context exists, use it to infer the real assignee, scope, and whether this should become the current user's arrangement.",
+              "For group conversations, only create or update a draft when the target message is clearly assigned to the current user, sent by the current user as their own plan, or requires all group members to execute a concrete shared arrangement.",
+              "If groupDisplayScope=selfOnly, stay strict and do not create a draft for tasks that mainly belong to other people.",
+              "If groupDisplayScope=all, you may also create drafts for concrete group-shared arrangements that are useful to keep in the arrangement module.",
+              "If enableAutoComplete=false, do not choose action=complete only from conversation context; prefer update or create and explain the completion signal in notes.",
+              "If the message is general discussion, informational chatter, social context without a concrete task, or mainly directed to other people, set shouldCreateDraft=false and explain why in relevanceReason.",
               "When action is update, complete, or merge, fill targetUid with the best primary uid from the provided arrangements.",
               "When action is merge, fill targetUids with all related arrangement uids that should be grouped or consolidated.",
               "Do not only append text. Optimize the resulting arrangement so the user gets a cleaner, more useful plan.",
               "Use this schema:",
-              '{"action":"create|update|complete|merge","targetUid":"string","targetUids":["string"],"title":"string","content":"string","kind":"task|schedule|reminder|note","priority":"low|normal|important|urgent","scheduledAt":"string","scheduledAtText":"string","location":"string","participants":["string"],"tags":["string"],"completionCriteria":"string","confidence":"low|medium|high","notes":"string","optimizationSummary":"string"}',
+              '{"action":"create|update|complete|merge","targetUid":"string","targetUids":["string"],"shouldCreateDraft":true,"relevanceReason":"string","title":"string","content":"string","kind":"task|schedule|reminder|note","priority":"low|normal|important|urgent","scheduledAt":"string","scheduledAtText":"string","location":"string","participants":["string"],"tags":["string"],"completionCriteria":"string","confidence":"low|medium|high","notes":"string","optimizationSummary":"string"}',
               "If the text is ambiguous, keep confidence low and explain uncertainty in notes.",
             ].join(" "),
         },
@@ -828,6 +1011,9 @@ async function recognizeArrangementFromText(
           content: [
             "User text:",
             inputText,
+            "",
+            "Conversation context:",
+            formatArrangementAiConversationContext(conversationContext),
             "",
             "Current unfinished arrangements for priority comparison and merge/replan reference:",
             formatArrangementAiContext(inputText, arrangements),
@@ -1110,13 +1296,13 @@ function getNextFriday() {
 
 function getArrangementStatusCardClass(status: ArrangementStatus) {
   if (status === "completed") {
-    return "border-emerald-200 bg-emerald-50/80 dark:border-emerald-900/60 dark:bg-emerald-950/20";
+    return "border-emerald-200 bg-emerald-50 dark:border-emerald-900/60 dark:bg-emerald-950/35";
   }
   if (status === "expired") {
-    return "border-rose-200 bg-rose-50/80 dark:border-rose-900/60 dark:bg-rose-950/20";
+    return "border-rose-200 bg-rose-50 dark:border-rose-900/60 dark:bg-rose-950/35";
   }
   if (status === "paused") {
-    return "border-amber-300/70 bg-amber-50/80 dark:border-amber-900/60 dark:bg-amber-950/20";
+    return "border-amber-300 bg-amber-50 dark:border-amber-900/60 dark:bg-amber-950/35";
   }
   return "border-primary/35 bg-[var(--record-card-bg)]";
 }
@@ -1234,6 +1420,7 @@ function shouldRequestBrowserNotificationPermission() {
 
 export default function Home({ currentPage, onNavigate }: HomeProps) {
   const { t } = usePreferences();
+  const candidateProfile = useCandidateProfile();
   const [showSearch, setShowSearch] = React.useState(false);
   const [showMenu, setShowMenu] = React.useState(false);
   const [showAnswerGuide, setShowAnswerGuide] = React.useState(false);
@@ -1254,6 +1441,12 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
   const [searchHistory, setSearchHistory] = React.useState(getInitialSearchHistory);
   const [recordDetail, setRecordDetail] = React.useState<RecordItem | null>(null);
   const [recordSnapshot, setRecordSnapshot] = React.useState<RecordItem | null>(null);
+  const [incomingArrangementDrafts, setIncomingArrangementDrafts] =
+    React.useState<IncomingArrangementDraft[]>([]);
+  const [focusedArrangementId, setFocusedArrangementId] = React.useState<string | null>(null);
+  const [messageArrangementPending, setMessageArrangementPending] = React.useState(false);
+  const [messageArrangementNotice, setMessageArrangementNotice] = React.useState("");
+  const [showChatArrangementScreen, setShowChatArrangementScreen] = React.useState(false);
   const [lastReadAiConversationCount, setLastReadAiConversationCount] =
     React.useState(getInitialAiConversationReadCount);
   const recordsDemoBaseTime = React.useMemo(() => Date.now(), []);
@@ -1264,6 +1457,9 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
   const [arrangementAiConfig, setArrangementAiConfig] = React.useState(
     getInitialArrangementAiConfig
   );
+  const [chatArrangementSettings, setChatArrangementSettings] = React.useState(
+    getInitialChatArrangementSettings
+  );
   const [testIdentities, setTestIdentities] = React.useState(getInitialTestIdentities);
   const [testGroups, setTestGroups] = React.useState(getInitialTestGroups);
   const [testMessages, setTestMessages] = React.useState(getInitialTestMessages);
@@ -1271,6 +1467,8 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     React.useState<TestReadState>(getInitialTestReadState);
   const initializedBrowserNotificationMessagesRef = React.useRef(false);
   const browserNotifiedMessageIdsRef = React.useRef<Set<string>>(new Set());
+  const initializedAutoCompleteMonitorRef = React.useRef(false);
+  const autoCompletedMessageIdsRef = React.useRef<Set<string>>(new Set());
 
   const unreadAiConversationCount = Math.max(
     0,
@@ -1332,6 +1530,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     (
       label: string,
       iconLabel: string,
+      conversationType: TestConversationType,
       conversationId: string,
       recordUid?: string
     ): RecordSourceConversation => ({
@@ -1339,6 +1538,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
       label,
       actionLabel: t("records.openSource"),
       iconLabel,
+      conversationType,
       conversationId,
       recordUid,
     }),
@@ -1456,6 +1656,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
             sourceConversation: makeTestSource(
               sourceLabel,
               iconLabel,
+              message.conversationType,
               message.conversationId,
               uid
             ),
@@ -1631,6 +1832,106 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     testConversationSummaries.find(
       (summary) => summary.conversationId === activeTestIdentityId
     ) ?? null;
+  const selfDisplayName = candidateProfile?.name || t("recordDetail.me");
+
+  const getConversationSpeakerName = React.useCallback(
+    (summary: TestConversationSummary, record: TestConversationRecord) => {
+      if (record.sender === "demo") {
+        return selfDisplayName;
+      }
+      if (summary.conversationType === "private") {
+        return summary.identity?.name || summary.title;
+      }
+      return (
+        summary.memberIdentities.find((identity) => identity.id === record.identityId)?.name ||
+        "群成员"
+      );
+    },
+    [selfDisplayName]
+  );
+
+  const buildArrangementConversationContext = React.useCallback(
+    (records: RecordItem[]): ArrangementAiConversationContext | null => {
+      const targetRecords = [...records].sort((a, b) => a.send_at - b.send_at);
+      const primaryRecord = targetRecords[0];
+      const conversationId = primaryRecord?.sourceConversation?.conversationId;
+      const conversationType = primaryRecord?.sourceConversation?.conversationType;
+      if (!conversationId || !conversationType) return null;
+
+      const summary = testConversationSummaries.find(
+        (item) => item.conversationId === conversationId
+      );
+      if (!summary) return null;
+
+      const sortedRecords = [...summary.records].sort((a, b) => a.send_at - b.send_at);
+      const targetIds = new Set(targetRecords.map((item) => item.uid));
+      const targetIndexes = targetRecords
+        .map((item) => sortedRecords.findIndex((record) => record.uid === item.uid))
+        .filter((index) => index >= 0);
+      const minIndex =
+        targetIndexes.length > 0 ? Math.min(...targetIndexes) : Math.max(0, sortedRecords.length - 1);
+      const maxIndex =
+        targetIndexes.length > 0 ? Math.max(...targetIndexes) : Math.max(0, sortedRecords.length - 1);
+      const startIndex = Math.max(0, minIndex - 3);
+      const endIndex = Math.min(sortedRecords.length, maxIndex + 3 + 1);
+      const targetRecord = sortedRecords[maxIndex] ?? sortedRecords[sortedRecords.length - 1];
+      const recentMessages = sortedRecords.slice(startIndex, endIndex).map((item) => ({
+        uid: item.uid,
+        speaker: getConversationSpeakerName(summary, item),
+        text: item.text_content,
+        sentAt: item.send_at,
+        isTarget: targetIds.has(item.uid),
+      }));
+
+      return {
+        conversationType,
+        conversationTitle: summary.title,
+        conversationSubtitle: summary.subtitle,
+        selfName: selfDisplayName,
+        speakerName: targetRecord
+          ? getConversationSpeakerName(summary, targetRecord)
+          : selfDisplayName,
+        memberNames: summary.memberIdentities.map((identity) => identity.name),
+        groupDisplayScope: chatArrangementSettings.groupDisplayScope,
+        enableAutoComplete: chatArrangementSettings.enableAutoComplete,
+        recentMessages,
+      };
+    },
+    [
+      chatArrangementSettings.enableAutoComplete,
+      chatArrangementSettings.groupDisplayScope,
+      getConversationSpeakerName,
+      selfDisplayName,
+      testConversationSummaries,
+    ]
+  );
+
+  const buildArrangementRecognitionInput = React.useCallback(
+    (records: RecordItem[]) => {
+      const sortedRecords = [...records]
+        .filter((record) => record.text_content.trim().length > 0)
+        .sort((a, b) => a.send_at - b.send_at);
+      const context = buildArrangementConversationContext(sortedRecords);
+      const inputText =
+        sortedRecords.length <= 1
+          ? sortedRecords[0]?.text_content.trim() ?? ""
+          : sortedRecords
+              .map((record) => {
+                const speaker =
+                  context?.recentMessages.find((item) => item.uid === record.uid)?.speaker ||
+                  (record.sourceConversation?.conversationType === "group" ? "群成员" : "对话");
+                return `${speaker}：${record.text_content.trim()}`;
+              })
+              .join("\n");
+
+      return {
+        inputText,
+        context,
+        sortedRecords,
+      };
+    },
+    [buildArrangementConversationContext]
+  );
 
   const mineStatisticRecords = React.useMemo(
     () => [
@@ -1916,6 +2217,93 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     testMessages,
   ]);
 
+  React.useEffect(() => {
+    const identityRecords = testConversationRecords.filter(
+      (record) => record.sender === "identity"
+    );
+
+    if (!initializedAutoCompleteMonitorRef.current) {
+      identityRecords.forEach((record) => {
+        autoCompletedMessageIdsRef.current.add(record.uid);
+      });
+      initializedAutoCompleteMonitorRef.current = true;
+      return;
+    }
+
+    const newIdentityRecords = identityRecords.filter(
+      (record) => !autoCompletedMessageIdsRef.current.has(record.uid)
+    );
+    if (newIdentityRecords.length === 0) return;
+
+    newIdentityRecords.forEach((record) => {
+      autoCompletedMessageIdsRef.current.add(record.uid);
+    });
+
+    if (!chatArrangementSettings.enableAutoComplete) return;
+    if (!isArrangementAiConfigReady(arrangementAiConfig)) return;
+
+    void (async () => {
+      for (const record of newIdentityRecords) {
+        const { inputText, context } = buildArrangementRecognitionInput([record]);
+        if (!inputText) continue;
+
+        try {
+          const result = await recognizeArrangementFromText(
+            arrangementAiConfig,
+            inputText,
+            getInitialArrangements(),
+            context
+          );
+          if (result.action !== "complete" || !result.targetUid) continue;
+
+          const nextArrangements = getInitialArrangements().map((arrangement) =>
+            arrangement.uid !== result.targetUid
+              ? arrangement
+              : {
+                  ...arrangement,
+                  status: "completed" as ArrangementStatus,
+                  completedAt: Date.now(),
+                  pausedAt: null,
+                  aiAction: "complete" as ArrangementAiAction,
+                  aiSummary: result.optimizationSummary || result.notes || arrangement.aiSummary,
+                  aiProcessedAt: Date.now(),
+                  updateAt: Date.now(),
+                }
+          );
+
+          if (nextArrangements.some((arrangement) => arrangement.uid === result.targetUid && arrangement.status === "completed")) {
+            persistArrangements(nextArrangements);
+            const completedArrangement = nextArrangements.find(
+              (arrangement) => arrangement.uid === result.targetUid
+            );
+            if (completedArrangement) {
+              setMessageArrangementNotice(`已根据新消息更新“${completedArrangement.title}”为完成`);
+            }
+          }
+        } catch {
+          // Keep chat monitoring silent on transient AI errors.
+        }
+      }
+    })();
+  }, [
+    arrangementAiConfig,
+    buildArrangementRecognitionInput,
+    chatArrangementSettings.enableAutoComplete,
+    testConversationRecords,
+  ]);
+
+  React.useEffect(() => {
+    if (!messageArrangementNotice) return undefined;
+    const timer = window.setTimeout(() => {
+      setMessageArrangementNotice("");
+    }, 3200);
+    return () => window.clearTimeout(timer);
+  }, [messageArrangementNotice]);
+
+  React.useEffect(() => {
+    persistChatArrangementSettings(chatArrangementSettings);
+  }, [chatArrangementSettings]);
+
   const openHomeMessagePreview = React.useCallback(() => {
     if (!homeMessagePreview) return;
 
@@ -1978,6 +2366,71 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     ]
   );
 
+  const openArrangementRecognitionFromRecords = React.useCallback(
+    async (records: RecordItem[]) => {
+      const normalizedRecords = [...records].filter(
+        (record, index, list) =>
+          record.text_content.trim().length > 0 &&
+          list.findIndex((item) => item.uid === record.uid) === index
+      );
+      if (normalizedRecords.length === 0) {
+        setMessageArrangementNotice("选中的消息没有可识别的文字内容。");
+        return;
+      }
+
+      if (!isArrangementAiConfigReady(arrangementAiConfig)) {
+        setMessageArrangementNotice("请先在“我的 - AI 模型”中完成配置。");
+        return;
+      }
+
+      setMessageArrangementNotice("");
+      setMessageArrangementPending(true);
+      try {
+        const nextDrafts: IncomingArrangementDraft[] = [];
+        for (const record of normalizedRecords) {
+          const { inputText, context, sortedRecords } = buildArrangementRecognitionInput([record]);
+          if (!inputText) continue;
+          const result = await recognizeArrangementFromText(
+            arrangementAiConfig,
+            inputText,
+            getInitialArrangements(),
+            context
+          );
+          if (!result.shouldCreateDraft) {
+            continue;
+          }
+          nextDrafts.push({
+            record: sortedRecords[sortedRecords.length - 1] ?? record,
+            inputText,
+            result,
+          });
+        }
+
+        if (nextDrafts.length === 0) {
+          setMessageArrangementNotice("这些消息暂未识别出可新建的安排。");
+          return;
+        }
+
+        setIncomingArrangementDrafts(nextDrafts);
+        onNavigate("arrangements");
+      } catch (error) {
+        setMessageArrangementNotice(
+          error instanceof Error ? error.message : "AI 识别失败，请稍后重试"
+        );
+      } finally {
+        setMessageArrangementPending(false);
+      }
+    },
+    [arrangementAiConfig, buildArrangementRecognitionInput, onNavigate]
+  );
+
+  const openArrangementRecognitionFromRecord = React.useCallback(
+    async (record: RecordItem) => {
+      await openArrangementRecognitionFromRecords([record]);
+    },
+    [openArrangementRecognitionFromRecords]
+  );
+
   const renderMainContent = () => {
     if (recordDetail) {
       return (
@@ -2030,6 +2483,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           targetIndex={aiConversationTargetIndex}
           onOpenRecordDetail={setRecordDetail}
           onOpenRecordSnapshot={setRecordSnapshot}
+          onRecognizeAsArrangement={openArrangementRecognitionFromRecord}
         />
       );
     }
@@ -2043,6 +2497,30 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           onCreateRecord={createSelfRecord}
           onOpenRecordDetail={setRecordDetail}
           onOpenRecordSnapshot={setRecordSnapshot}
+          onRecognizeAsArrangement={openArrangementRecognitionFromRecord}
+        />
+      );
+    }
+
+    if (showChatArrangementScreen && activeTestConversationSummary) {
+      return (
+        <ChatArrangementScreen
+          summary={activeTestConversationSummary}
+          settings={chatArrangementSettings}
+          relatedArrangements={getInitialArrangements().filter((arrangement) =>
+            arrangement.sources.some(
+              (source) =>
+                source.sourceConversation?.conversationId ===
+                activeTestConversationSummary.conversationId
+            )
+          )}
+          onBack={() => setShowChatArrangementScreen(false)}
+          onChangeSettings={setChatArrangementSettings}
+          onOpenArrangement={(uid) => {
+            setFocusedArrangementId(uid);
+            setShowChatArrangementScreen(false);
+            onNavigate("arrangements");
+          }}
         />
       );
     }
@@ -2053,8 +2531,11 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           summary={activeTestConversationSummary}
           targetUid={testConversationTargetUid}
           onBack={handleConversationBack}
+          onOpenArrangementSettings={() => setShowChatArrangementScreen(true)}
           onOpenRecordDetail={setRecordDetail}
           onOpenRecordSnapshot={setRecordSnapshot}
+          onRecognizeAsArrangement={openArrangementRecognitionFromRecord}
+          onRecognizeAsArrangementBatch={openArrangementRecognitionFromRecords}
           onCreateReply={(content) => createTestReply(activeTestConversationSummary, content)}
         />
       );
@@ -2079,6 +2560,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           onOpenRecordDetail={setRecordDetail}
           onOpenRecordSnapshot={setRecordSnapshot}
           onOpenSourceConversation={openSourceConversation}
+          onRecognizeAsArrangement={openArrangementRecognitionFromRecord}
         />
       );
     }
@@ -2098,6 +2580,14 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
         <ArrangementsPreview
           aiConfig={arrangementAiConfig}
           onOpenAiSettings={() => setSettingsView("arrangement-ai")}
+          incomingDraft={incomingArrangementDrafts[0] ?? null}
+          onConsumeIncomingDraft={() =>
+            setIncomingArrangementDrafts((prev) => prev.slice(1))
+          }
+          focusedArrangementId={focusedArrangementId}
+          onConsumeFocusedArrangement={() => setFocusedArrangementId(null)}
+          onOpenSourceRecord={setRecordDetail}
+          onOpenSourceConversation={openSourceConversation}
         />
       );
     }
@@ -2130,6 +2620,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           onOpenSourceConversation={openSourceConversation}
           onOpenRecordDetail={setRecordDetail}
           onOpenRecordSnapshot={setRecordSnapshot}
+          onRecognizeAsArrangement={openArrangementRecognitionFromRecord}
         />
       </div>
     );
@@ -2140,6 +2631,26 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
       mainPane={
         <div className="relative flex min-h-0 flex-1 flex-col">
           <main className="min-h-0 flex-1 overflow-hidden">{renderMainContent()}</main>
+          {messageArrangementNotice && (
+            <div className="pointer-events-none absolute left-1/2 top-4 z-40 w-[calc(100%-2rem)] max-w-sm -translate-x-1/2">
+              <div className="rounded-[16px] border border-line bg-surface/95 px-4 py-3 text-sm leading-6 text-text shadow-[0_14px_36px_rgba(15,23,42,0.16)] backdrop-blur">
+                {messageArrangementNotice}
+              </div>
+            </div>
+          )}
+          {messageArrangementPending && (
+            <div className="absolute inset-0 z-50 flex items-center justify-center bg-overlay-light/70 px-6">
+              <div className="flex w-full max-w-xs flex-col items-center rounded-[20px] bg-surface px-6 py-6 text-center shadow-[0_18px_48px_rgba(15,23,42,0.18)]">
+                <div className="h-10 w-10 rounded-full border-[3px] border-primary/20 border-t-primary animate-spin" />
+                <p className="mt-4 text-base font-semibold text-text">
+                  正在识别消息并生成安排
+                </p>
+                <p className="mt-2 text-sm leading-6 text-text-muted">
+                  请稍候，完成后会直接进入草稿确认页。
+                </p>
+              </div>
+            </div>
+          )}
           {!recordDetail && !showSearch && !showAnswerGuide && !showAiConversation && !showSendToSelf && !showTestConversation && !settingsView && (
             <MobileBottomNavigation currentPage={currentPage} onNavigate={onNavigate} />
           )}
@@ -2184,6 +2695,7 @@ function SearchScreen({
   onOpenRecordDetail,
   onOpenRecordSnapshot,
   onOpenSourceConversation,
+  onRecognizeAsArrangement,
 }: {
   searchQuery: string;
   searchHistory: string[];
@@ -2194,6 +2706,7 @@ function SearchScreen({
   onOpenRecordDetail: (record: RecordItem) => void;
   onOpenRecordSnapshot: (record: RecordItem) => void;
   onOpenSourceConversation: (source: RecordSourceConversation) => void;
+  onRecognizeAsArrangement: (record: RecordItem) => void;
 }) {
   const { resolvedTheme, t } = usePreferences();
   const [activeTab, setActiveTab] = React.useState<"records" | "topics">("records");
@@ -2319,6 +2832,7 @@ function SearchScreen({
                 onOpenSourceConversation={onOpenSourceConversation}
                 onOpenRecordDetail={onOpenRecordDetail}
                 onOpenRecordSnapshot={onOpenRecordSnapshot}
+                onRecognizeAsArrangement={onRecognizeAsArrangement}
               />
             ) : (
               <SearchEmptyState
@@ -2548,17 +3062,17 @@ function recordMatchesQuickType(record: RecordItem, type: QuickSearchType) {
 
   switch (type) {
     case "image":
-      return /鍥剧墖|鐓х墖|瑙嗛|image|photo|video/.test(combined);
+      return /图片|照片|视频|image|photo|video/.test(combined);
     case "audio":
-      return /璇煶|闊抽|褰曢煶|voice|audio|recording/.test(combined);
+      return /语音|音频|录音|voice|audio|recording/.test(combined);
     case "link":
-      return /閾炬帴|http|link|url/.test(combined);
+      return /链接|http|link|url/.test(combined);
     case "file":
-      return /鏂囦欢|鏂囨。|file|document/.test(combined);
+      return /文件|文档|file|document/.test(combined);
     case "longArticle":
       return Array.from(record.text_content).length >= 80;
     case "contact":
-      return /鑱旂郴浜簗鍚屼簨|鍊欓€変汉|鐢ㄦ埛|ai|contact|user/.test(combined);
+      return /联系人|同事|候选人|用户|ai|contact|user/.test(combined);
     default:
       return true;
   }
@@ -3063,13 +3577,15 @@ function formatUnreadCount(count: number) {
 function AiToolConversationChat({
   onBack,
   targetIndex,
-  onOpenRecordDetail,
+  onOpenRecordDetail: _onOpenRecordDetail,
   onOpenRecordSnapshot,
+  onRecognizeAsArrangement,
 }: {
   onBack: () => void;
   targetIndex?: number | null;
   onOpenRecordDetail: (record: RecordItem) => void;
   onOpenRecordSnapshot: (record: RecordItem) => void;
+  onRecognizeAsArrangement: (record: RecordItem) => void;
 }) {
   const { t } = usePreferences();
   const scrollContainerRef = React.useRef<HTMLDivElement>(null);
@@ -3186,9 +3702,12 @@ function AiToolConversationChat({
                           textContent={userInputRecord.text_content}
                           disableAnimation
                           variant="primary"
-                          onOpenDetail={() => onOpenRecordDetail(userInputRecord)}
+                          onOpenDetail={undefined}
                           onOpenMemorySnapshot={() =>
                             onOpenRecordSnapshot(userInputRecord)
+                          }
+                          onRecognizeAsArrangement={() =>
+                            onRecognizeAsArrangement(userInputRecord)
                           }
                         />
                       );
@@ -3248,8 +3767,9 @@ function SendToSelfConversationChat({
   targetUid,
   onBack,
   onCreateRecord,
-  onOpenRecordDetail,
+  onOpenRecordDetail: _onOpenRecordDetail,
   onOpenRecordSnapshot,
+  onRecognizeAsArrangement,
 }: {
   records: RecordItem[];
   targetUid?: string | null;
@@ -3257,6 +3777,7 @@ function SendToSelfConversationChat({
   onCreateRecord: (content: string) => void;
   onOpenRecordDetail: (record: RecordItem) => void;
   onOpenRecordSnapshot: (record: RecordItem) => void;
+  onRecognizeAsArrangement: (record: RecordItem) => void;
 }) {
   const { t } = usePreferences();
   const recordsWithoutSource = React.useMemo(
@@ -3299,8 +3820,9 @@ function SendToSelfConversationChat({
         loading={false}
         onLoadMore={() => undefined}
         targetRecordUid={targetUid}
-        onOpenRecordDetail={onOpenRecordDetail}
+        onOpenRecordDetail={undefined}
         onOpenRecordSnapshot={onOpenRecordSnapshot}
+        onRecognizeAsArrangement={onRecognizeAsArrangement}
       />
       <ChatInput
         onSubmit={onCreateRecord}
@@ -3314,15 +3836,21 @@ function TestIdentityConversationChat({
   summary,
   targetUid,
   onBack,
-  onOpenRecordDetail,
+  onOpenArrangementSettings,
+  onOpenRecordDetail: _onOpenRecordDetail,
   onOpenRecordSnapshot,
+  onRecognizeAsArrangement,
+  onRecognizeAsArrangementBatch,
   onCreateReply,
 }: {
   summary: TestConversationSummary;
   targetUid?: string | null;
   onBack: () => void;
+  onOpenArrangementSettings: () => void;
   onOpenRecordDetail: (record: RecordItem) => void;
   onOpenRecordSnapshot: (record: RecordItem) => void;
+  onRecognizeAsArrangement: (record: RecordItem) => void;
+  onRecognizeAsArrangementBatch: (records: RecordItem[]) => void;
   onCreateReply: (content: string) => void;
 }) {
   const { resolvedLocale, t } = usePreferences();
@@ -3330,10 +3858,21 @@ function TestIdentityConversationChat({
   const selfDisplayName = candidateProfile?.name || t("recordDetail.me");
   const scrollContainerRef = React.useRef<HTMLDivElement>(null);
   const recordRefs = React.useRef<Map<string, HTMLDivElement>>(new Map());
+  const [selectionMode, setSelectionMode] = React.useState(false);
+  const [selectedRecordUids, setSelectedRecordUids] = React.useState<string[]>([]);
   const sortedRecords = React.useMemo(
     () => [...summary.records].sort((a, b) => a.send_at - b.send_at),
     [summary.records]
   );
+  const selectedRecords = React.useMemo(
+    () => sortedRecords.filter((record) => selectedRecordUids.includes(record.uid)),
+    [selectedRecordUids, sortedRecords]
+  );
+
+  React.useEffect(() => {
+    setSelectionMode(false);
+    setSelectedRecordUids([]);
+  }, [summary.conversationId]);
 
   React.useLayoutEffect(() => {
     const container = scrollContainerRef.current;
@@ -3371,6 +3910,27 @@ function TestIdentityConversationChat({
             </p>
           </div>
         </div>
+        <button
+          type="button"
+          className="ml-auto flex h-10 w-10 items-center justify-center rounded-full text-text-muted transition hover:bg-hover-overlay active:scale-[0.96]"
+          onClick={onOpenArrangementSettings}
+          aria-label="聊天安排设置"
+        >
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1 1 0 0 0 .2 1.1l.1.1a1 1 0 0 1 0 1.4l-1 1a1 1 0 0 1-1.4 0l-.1-.1a1 1 0 0 0-1.1-.2 1 1 0 0 0-.6.9V20a1 1 0 0 1-1 1h-1.5a1 1 0 0 1-1-1v-.2a1 1 0 0 0-.7-.9 1 1 0 0 0-1.1.2l-.1.1a1 1 0 0 1-1.4 0l-1-1a1 1 0 0 1 0-1.4l.1-.1a1 1 0 0 0 .2-1.1 1 1 0 0 0-.9-.6H4a1 1 0 0 1-1-1v-1.5a1 1 0 0 1 1-1h.2a1 1 0 0 0 .9-.7 1 1 0 0 0-.2-1.1l-.1-.1a1 1 0 0 1 0-1.4l1-1a1 1 0 0 1 1.4 0l.1.1a1 1 0 0 0 1.1.2 1 1 0 0 0 .6-.9V4a1 1 0 0 1 1-1h1.5a1 1 0 0 1 1 1v.2a1 1 0 0 0 .7.9 1 1 0 0 0 1.1-.2l.1-.1a1 1 0 0 1 1.4 0l1 1a1 1 0 0 1 0 1.4l-.1.1a1 1 0 0 0-.2 1.1 1 1 0 0 0 .9.6H20a1 1 0 0 1 1 1v1.5a1 1 0 0 1-1 1h-.2a1 1 0 0 0-.9.7Z" />
+          </svg>
+        </button>
       </header>
 
       <div
@@ -3394,9 +3954,20 @@ function TestIdentityConversationChat({
                   }
                 }}
                 className={cn(
-                  "scroll-mt-4",
-                  targetUid === record.uid && "rounded-[18px] bg-primary-soft/70 py-1"
+                  "scroll-mt-4 transition-all duration-300",
+                  targetUid === record.uid &&
+                    "rounded-[18px] border border-primary/30 bg-primary-soft/80 px-2 py-2 shadow-[0_0_0_3px_rgba(9,184,62,0.12)]"
                 )}
+                onClick={
+                  selectionMode
+                    ? () =>
+                        setSelectedRecordUids((prev) =>
+                          prev.includes(record.uid)
+                            ? prev.filter((uid) => uid !== record.uid)
+                            : [...prev, record.uid]
+                        )
+                    : undefined
+                }
               >
                 {showTime && (
                   <div className="mb-3 flex justify-center">
@@ -3412,7 +3983,20 @@ function TestIdentityConversationChat({
                   </div>
                 )}
                 {record.sender === "demo" ? (
-                  <div className="-mx-4">
+                  <div className="flex items-start gap-2">
+                    {selectionMode && (
+                      <span
+                        className={cn(
+                          "mt-3 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[11px]",
+                          selectedRecordUids.includes(record.uid)
+                            ? "border-primary bg-primary text-white"
+                            : "border-border bg-surface text-transparent"
+                        )}
+                      >
+                        ✓
+                      </span>
+                    )}
+                    <div className="-mx-4 min-w-0 flex-1">
                     <ChatBubble
                       textContent={record.text_content}
                       disableAnimation
@@ -3420,12 +4004,36 @@ function TestIdentityConversationChat({
                       topLabel={
                         summary.conversationType === "group" ? selfDisplayName : undefined
                       }
-                      onOpenDetail={() => onOpenRecordDetail(record)}
-                      onOpenMemorySnapshot={() => onOpenRecordSnapshot(record)}
+                      onOpenDetail={undefined}
+                      onOpenMemorySnapshot={
+                        selectionMode ? undefined : () => onOpenRecordSnapshot(record)
+                      }
+                      onRecognizeAsArrangement={
+                        selectionMode ? undefined : () => onRecognizeAsArrangement(record)
+                      }
+                      onEnterSelectionMode={() => {
+                        setSelectionMode(true);
+                        setSelectedRecordUids((prev) =>
+                          prev.includes(record.uid) ? prev : [...prev, record.uid]
+                        );
+                      }}
                     />
+                    </div>
                   </div>
                 ) : (
                   <div className="flex items-start gap-2.5">
+                    {selectionMode && (
+                      <span
+                        className={cn(
+                          "mt-6 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[11px]",
+                          selectedRecordUids.includes(record.uid)
+                            ? "border-primary bg-primary text-white"
+                            : "border-border bg-surface text-transparent"
+                        )}
+                      >
+                        ✓
+                      </span>
+                    )}
                     <TestMessageIdentityAvatar
                       identityId={record.identityId}
                       summary={summary}
@@ -3438,15 +4046,27 @@ function TestIdentityConversationChat({
                           )?.name ?? "群成员"}
                         </p>
                       )}
-                      <button
-                        type="button"
-                        className="max-w-full rounded-[14px] rounded-tl-[4px] bg-surface px-3.5 py-2.5 text-left text-text shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition hover:bg-[var(--record-card-hover-bg)] active:scale-[0.99]"
-                        onClick={() => onOpenRecordDetail(record)}
-                      >
-                        <p className="whitespace-pre-wrap break-words text-[14px] leading-[1.55]">
-                          {record.text_content}
-                        </p>
-                      </button>
+                      <div className="-mx-4">
+                        <ChatBubble
+                          textContent={record.text_content}
+                          disableAnimation
+                          align="start"
+                          showSelfAvatar={false}
+                          onOpenDetail={undefined}
+                          onOpenMemorySnapshot={
+                            selectionMode ? undefined : () => onOpenRecordSnapshot(record)
+                          }
+                          onRecognizeAsArrangement={
+                            selectionMode ? undefined : () => onRecognizeAsArrangement(record)
+                          }
+                          onEnterSelectionMode={() => {
+                            setSelectionMode(true);
+                            setSelectedRecordUids((prev) =>
+                              prev.includes(record.uid) ? prev : [...prev, record.uid]
+                            );
+                          }}
+                        />
+                      </div>
                     </div>
                   </div>
                 )}
@@ -3455,6 +4075,36 @@ function TestIdentityConversationChat({
           })}
         </div>
       </div>
+      {selectionMode && (
+        <div className="border-t border-border-light bg-bg px-4 py-3">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm text-text-muted">
+              已选择 {selectedRecords.length} 条消息
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="h-10 rounded-[10px] px-3 text-sm font-medium text-text-tertiary transition active:scale-[0.97]"
+                onClick={() => setSelectedRecordUids([])}
+              >
+                清空
+              </button>
+              <button
+                type="button"
+                disabled={selectedRecords.length === 0}
+                className="h-10 rounded-[10px] bg-primary px-4 text-sm font-semibold text-on-primary transition active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-35"
+                onClick={() => {
+                  onRecognizeAsArrangementBatch(selectedRecords);
+                  setSelectionMode(false);
+                  setSelectedRecordUids([]);
+                }}
+              >
+                识别为安排
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <ChatInput
         onSubmit={onCreateReply}
         onVoiceSubmit={() => onCreateReply(t("records.voiceRecord"))}
@@ -3645,9 +4295,21 @@ function MobileBottomNavigation({
 function ArrangementsPreview({
   aiConfig,
   onOpenAiSettings,
+  incomingDraft,
+  onConsumeIncomingDraft,
+  focusedArrangementId,
+  onConsumeFocusedArrangement,
+  onOpenSourceRecord,
+  onOpenSourceConversation,
 }: {
   aiConfig: ArrangementAiConfig;
   onOpenAiSettings: () => void;
+  incomingDraft: IncomingArrangementDraft | null;
+  onConsumeIncomingDraft: () => void;
+  focusedArrangementId: string | null;
+  onConsumeFocusedArrangement: () => void;
+  onOpenSourceRecord: (record: RecordItem) => void;
+  onOpenSourceConversation: (source: RecordSourceConversation) => void;
 }) {
   const [arrangements, setArrangements] = React.useState(getInitialArrangements);
   const [showForm, setShowForm] = React.useState(false);
@@ -3667,6 +4329,9 @@ function ArrangementsPreview({
   const [sourceType, setSourceType] = React.useState<ArrangementSourceType>("manual");
   const [sourceLabel, setSourceLabel] = React.useState(defaultArrangementSource.label);
   const [sourceText, setSourceText] = React.useState("");
+  const [sourceConversation, setSourceConversation] =
+    React.useState<RecordSourceConversation | null>(null);
+  const [sourceRecord, setSourceRecord] = React.useState<RecordReference | null>(null);
   const [saveHint, setSaveHint] = React.useState("");
   const [aiInputText, setAiInputText] = React.useState("");
   const [aiResult, setAiResult] = React.useState<ArrangementAiRecognitionResult | null>(null);
@@ -3676,6 +4341,14 @@ function ArrangementsPreview({
   const [pendingSuggestedStatus, setPendingSuggestedStatus] = React.useState<ArrangementStatus | null>(null);
   const [pendingOptimizationSummary, setPendingOptimizationSummary] = React.useState("");
   const [pendingAiAction, setPendingAiAction] = React.useState<ArrangementAiAction | null>(null);
+  const [showFilters, setShowFilters] = React.useState(false);
+  const [filters, setFilters] = React.useState<ArrangementFilterState>({
+    status: "all",
+    priority: "all",
+    kind: "all",
+    timeRange: "quarter",
+    selectedDateKeys: [],
+  });
   const [nowTick, setNowTick] = React.useState(() => Date.now());
   const activeArrangement =
     arrangements.find((arrangement) => arrangement.uid === activeArrangementId) ?? null;
@@ -3684,10 +4357,6 @@ function ArrangementsPreview({
   const canSubmit = title.trim().length > 0 && content.trim().length > 0;
   const canSubmitAiRecognition = aiInputText.trim().length > 0 && !aiLoading;
   const hasReadyAiConfig = isArrangementAiConfigReady(aiConfig);
-  const todoCount = arrangements.filter((item) => item.status === "todo").length;
-  const expiredCount = arrangements.filter((item) => item.status === "expired").length;
-  const pausedCount = arrangements.filter((item) => item.status === "paused").length;
-  const completedCount = arrangements.filter((item) => item.status === "completed").length;
   const pendingMergeTargets = React.useMemo(
     () =>
       pendingMergeTargetUids
@@ -3695,6 +4364,7 @@ function ArrangementsPreview({
         .filter((arrangement): arrangement is ArrangementItem => Boolean(arrangement)),
     [arrangements, pendingMergeTargetUids]
   );
+
   const aiResultTargetTitles = React.useMemo(() => {
     if (!aiResult) return [];
 
@@ -3724,6 +4394,53 @@ function ArrangementsPreview({
       }),
     [arrangements]
   );
+  const filteredArrangements = React.useMemo(() => {
+    const now = new Date(nowTick);
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const weekEnd = todayStart + 7 * 24 * 60 * 60 * 1000;
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, now.getDate()).getTime();
+    const quarterRange = getCurrentQuarterRange(nowTick);
+
+    return sortedArrangements.filter((arrangement) => {
+      if (filters.status !== "all" && arrangement.status !== filters.status) return false;
+      if (filters.priority !== "all" && arrangement.priority !== filters.priority) return false;
+      if (filters.kind !== "all" && arrangement.kind !== filters.kind) return false;
+      if (filters.selectedDateKeys.length > 0) {
+        const arrangementDateKey = toArrangementDateKey(arrangement.scheduledAt);
+        if (!arrangementDateKey || !filters.selectedDateKeys.includes(arrangementDateKey)) {
+          return false;
+        }
+      }
+      if (filters.timeRange === "quarter") {
+        return (
+          arrangement.scheduledAt !== null &&
+          arrangement.scheduledAt >= quarterRange.start &&
+          arrangement.scheduledAt < quarterRange.end
+        );
+      }
+      if (filters.timeRange === "today") {
+        return (
+          arrangement.scheduledAt !== null &&
+          arrangement.scheduledAt >= todayStart &&
+          arrangement.scheduledAt < todayStart + 24 * 60 * 60 * 1000
+        );
+      }
+      if (filters.timeRange === "week") {
+        return arrangement.scheduledAt !== null && arrangement.scheduledAt >= todayStart && arrangement.scheduledAt < weekEnd;
+      }
+      if (filters.timeRange === "month") {
+        return arrangement.scheduledAt !== null && arrangement.scheduledAt >= todayStart && arrangement.scheduledAt < monthEnd;
+      }
+      if (filters.timeRange === "overdue") {
+        return arrangement.scheduledAt !== null && arrangement.scheduledAt < todayStart && arrangement.status !== "completed";
+      }
+      return true;
+    });
+  }, [filters, nowTick, sortedArrangements]);
+  const todoCount = filteredArrangements.filter((item) => item.status === "todo").length;
+  const expiredCount = filteredArrangements.filter((item) => item.status === "expired").length;
+  const pausedCount = filteredArrangements.filter((item) => item.status === "paused").length;
+  const completedCount = filteredArrangements.filter((item) => item.status === "completed").length;
 
   React.useEffect(() => {
     const timer = window.setInterval(() => {
@@ -3760,6 +4477,8 @@ function ArrangementsPreview({
     setSourceType("manual");
     setSourceLabel(defaultArrangementSource.label);
     setSourceText("");
+    setSourceConversation(null);
+    setSourceRecord(null);
     setPendingMergeTargetUids([]);
     setPendingSuggestedStatus(null);
     setPendingOptimizationSummary("");
@@ -3776,29 +4495,51 @@ function ArrangementsPreview({
     resetForm();
     setShowForm(true);
     setShowAiRecognizer(false);
+    setShowFilters(false);
     setActiveArrangementId(null);
     setSaveHint("");
   };
 
-  const resetAiRecognizer = () => {
+  const resetAiRecognizer = React.useCallback(() => {
     setAiInputText("");
     setAiResult(null);
     setAiError("");
     setAiLoading(false);
-  };
+  }, []);
 
-  const openAiRecognizerWithInput = (initialText: string) => {
+  const clearConversationSourceDraft = React.useCallback(() => {
+    setSourceConversation(null);
+    setSourceRecord(null);
+    if (sourceType === "conversation") {
+      setSourceType("manual");
+      setSourceLabel(defaultArrangementSource.label);
+      setSourceText("");
+    }
+  }, [sourceType]);
+
+  const getConversationDraftContext = React.useCallback(
+    (record: RecordItem): ArrangementSourceDraftContext => ({
+      sourceLabel: getConversationArrangementSourceLabel(record.sourceConversation),
+      sourceConversation: record.sourceConversation ?? null,
+      sourceRecord: makeRecordReference(record),
+    }),
+    []
+  );
+
+  const openAiRecognizerWithInput = React.useCallback((initialText: string) => {
     resetAiRecognizer();
     setAiInputText(initialText.trim());
     setShowForm(false);
     setShowAiRecognizer(true);
     setActiveArrangementId(null);
     setSaveHint("");
-  };
+  }, [resetAiRecognizer]);
 
   const createAiDraftFromInput = async (rawInput: string) => {
     const nextInput = rawInput.trim();
     if (!nextInput) return;
+
+    clearConversationSourceDraft();
 
     if (!hasReadyAiConfig) {
       openAiRecognizerWithInput(nextInput);
@@ -3822,7 +4563,7 @@ function ArrangementsPreview({
         openAiOptimizationForm(result, nextInput);
       }
     } catch (error) {
-      setAiError(error instanceof Error ? error.message : "AI 璇嗗埆澶辫触锛岃绋嶅悗閲嶈瘯");
+      setAiError(error instanceof Error ? error.message : "AI 识别失败，请稍后重试");
       setShowForm(false);
       setShowAiRecognizer(true);
       setActiveArrangementId(null);
@@ -3831,10 +4572,11 @@ function ArrangementsPreview({
     }
   };
 
-  const openAiOptimizationForm = (
+  function openAiOptimizationForm(
     result: ArrangementAiRecognitionResult,
-    sourceOriginalText: string
-  ) => {
+    sourceOriginalText: string,
+    sourceContext?: ArrangementSourceDraftContext
+  ) {
     const targetUids = dedupeArrangementTextList(
       [result.targetUid, ...result.targetUids].filter(Boolean)
     );
@@ -3871,9 +4613,19 @@ function ArrangementsPreview({
     setTagsText(formatArrangementTextList(mergedTags));
     setChecklistText(primaryTarget.checklist.map((item) => item.text).join("\n"));
     setCompletionCriteria(result.completionCriteria || primaryTarget.completionCriteria);
-    setSourceType("text");
-    setSourceLabel("\u0041\u0049\u6587\u672c\u8bc6\u522b");
+    const effectiveSourceConversation =
+      sourceContext?.sourceConversation ?? sourceConversation;
+    const effectiveSourceRecord = sourceContext?.sourceRecord ?? sourceRecord;
+    const effectiveSourceLabel =
+      sourceContext?.sourceLabel ??
+      (effectiveSourceRecord
+        ? getConversationArrangementSourceLabel(effectiveSourceConversation)
+        : "AI文本识别");
+    setSourceType(effectiveSourceRecord ? "conversation" : "text");
+    setSourceLabel(effectiveSourceLabel);
     setSourceText(sourceOriginalText);
+    setSourceConversation(effectiveSourceConversation);
+    setSourceRecord(effectiveSourceRecord);
     setPendingMergeTargetUids(targets.map((item) => item.uid));
     setPendingSuggestedStatus(result.action === "complete" ? "completed" : null);
     setPendingOptimizationSummary(result.optimizationSummary || result.notes);
@@ -3884,12 +4636,12 @@ function ArrangementsPreview({
     setActiveArrangementId(null);
     setSaveHint(
       result.action === "complete"
-        ? "\u0041\u0049\u5efa\u8bae\u5c06\u8fd9\u6761\u5b89\u6392\u6807\u8bb0\u4e3a\u5b8c\u6210\uff0c\u8bf7\u786e\u8ba4\u540e\u4fdd\u5b58\u3002"
+        ? "AI建议将这条安排标记为完成，请确认后保存。"
         : targets.length > 1
-          ? "\u0041\u0049\u5efa\u8bae\u5c06\u76f8\u5173\u5b89\u6392\u8fdb\u884c\u5408\u5e76\u4e0e\u91cd\u65b0\u89c4\u5212\uff0c\u8bf7\u786e\u8ba4\u540e\u4fdd\u5b58\u3002"
-          : "\u0041\u0049\u5efa\u8bae\u66f4\u65b0\u539f\u6709\u5b89\u6392\uff0c\u8bf7\u786e\u8ba4\u540e\u4fdd\u5b58\u3002"
+          ? "AI建议将相关安排进行合并与重新规划，请确认后保存。"
+          : "AI建议更新原有安排，请确认后保存。"
     );
-  };
+  }
 
   const openEditForm = (arrangement: ArrangementItem) => {
     setTitle(arrangement.title);
@@ -3905,6 +4657,12 @@ function ArrangementsPreview({
     setSourceType(arrangement.sources[0]?.type ?? arrangement.source.type);
     setSourceLabel(arrangement.sources[0]?.label ?? arrangement.source.label);
     setSourceText(arrangement.sources[0]?.text ?? arrangement.source.text);
+    setSourceConversation(
+      arrangement.sources[0]?.sourceConversation ?? arrangement.source.sourceConversation ?? null
+    );
+    setSourceRecord(
+      arrangement.sources[0]?.sourceRecord ?? arrangement.source.sourceRecord ?? null
+    );
     setPendingMergeTargetUids([arrangement.uid]);
     setPendingSuggestedStatus(null);
     setPendingOptimizationSummary("");
@@ -3915,10 +4673,19 @@ function ArrangementsPreview({
     setSaveHint("");
   };
 
-  const openAiDraftForm = (
+  function openAiDraftForm(
     result: ArrangementAiRecognitionResult,
-    sourceOriginalText = aiInputText.trim()
-  ) => {
+    sourceOriginalText = aiInputText.trim(),
+    sourceContext?: ArrangementSourceDraftContext
+  ) {
+    const currentSourceConversation =
+      sourceContext?.sourceConversation ?? sourceConversation;
+    const currentSourceRecord = sourceContext?.sourceRecord ?? sourceRecord;
+    const currentSourceLabel =
+      sourceContext?.sourceLabel ??
+      (currentSourceRecord
+        ? getConversationArrangementSourceLabel(currentSourceConversation)
+        : "AI文本识别");
     resetForm();
     setTitle(result.title);
     setContent(result.content);
@@ -3932,9 +4699,11 @@ function ArrangementsPreview({
     setParticipantsText(formatArrangementTextList(result.participants));
     setTagsText(formatArrangementTextList(result.tags));
     setCompletionCriteria(result.completionCriteria);
-    setSourceType("text");
-    setSourceLabel("\u0041\u0049\u6587\u672c\u8bc6\u522b");
+    setSourceType(currentSourceRecord ? "conversation" : "text");
+    setSourceLabel(currentSourceLabel);
     setSourceText(sourceOriginalText);
+    setSourceConversation(currentSourceConversation);
+    setSourceRecord(currentSourceRecord);
     setPendingOptimizationSummary(result.optimizationSummary || result.notes);
     setPendingAiAction(result.action);
     setShowAiRecognizer(false);
@@ -3942,10 +4711,52 @@ function ArrangementsPreview({
     setActiveArrangementId(null);
     setSaveHint(
       parsedScheduledAt === null && result.scheduledAtText
-        ? "\u5df2\u751f\u6210\u5b89\u6392\u8349\u7a3f\uff0c\u8bf7\u8865\u5145\u5177\u4f53\u65f6\u95f4\u540e\u4fdd\u5b58\u3002"
-        : "\u5df2\u751f\u6210\u5b89\u6392\u8349\u7a3f\uff0c\u8bf7\u786e\u8ba4\u5185\u5bb9\u540e\u4fdd\u5b58\u3002"
+        ? "已生成安排草稿，请补充具体时间后保存。"
+        : "已生成安排草稿，请确认内容后保存。"
     );
-  };
+  }
+
+  React.useEffect(() => {
+    if (!incomingDraft || showForm || showAiRecognizer || activeArrangementId) return;
+
+    const sourceContext = getConversationDraftContext(incomingDraft.record);
+    resetForm();
+    setAiInputText(incomingDraft.inputText);
+    setAiError("");
+    setAiResult(incomingDraft.result);
+    setAiLoading(false);
+
+    if (
+      incomingDraft.result.action === "create" ||
+      (!incomingDraft.result.targetUid && incomingDraft.result.targetUids.length === 0)
+    ) {
+      openAiDraftForm(incomingDraft.result, incomingDraft.inputText, sourceContext);
+    } else {
+      openAiOptimizationForm(incomingDraft.result, incomingDraft.inputText, sourceContext);
+    }
+
+    onConsumeIncomingDraft();
+  }, [
+    getConversationDraftContext,
+    incomingDraft,
+    activeArrangementId,
+    onConsumeIncomingDraft,
+    openAiDraftForm,
+    openAiOptimizationForm,
+    resetForm,
+    showAiRecognizer,
+    showForm,
+  ]);
+
+  React.useEffect(() => {
+    if (!focusedArrangementId) return;
+    setShowAiRecognizer(false);
+    setShowFilters(false);
+    setShowForm(false);
+    setEditingArrangementId(null);
+    setActiveArrangementId(focusedArrangementId);
+    onConsumeFocusedArrangement();
+  }, [focusedArrangementId, onConsumeFocusedArrangement]);
 
   const updateArrangement = (
     uid: string,
@@ -3974,9 +4785,12 @@ function ArrangementsPreview({
       type: sourceType,
       label: sourceLabel.trim() || defaultArrangementSource.label,
       text: normalizedSourceText,
+      ...(sourceConversation ? { sourceConversation } : {}),
+      ...(sourceRecord ? { sourceRecord } : {}),
     };
     const nextOpenStatus = getOpenArrangementStatus(scheduledAt, now);
     const nextAiSummary = pendingOptimizationSummary.trim();
+    const isAiDerivedSource = sourceType === "text" || sourceType === "conversation";
 
     if (editingArrangement) {
       const relatedTargets = dedupeArrangementTextList(
@@ -4009,7 +4823,7 @@ function ArrangementsPreview({
             : primaryTarget.status;
       const nextAiAction = pendingAiAction ?? primaryTarget.aiAction;
       const nextAiRelatedArrangementTitles =
-        sourceType === "text"
+        isAiDerivedSource
           ? dedupeArrangementTextList(
               relatedTargets.map((arrangement) => arrangement.title)
             )
@@ -4038,12 +4852,12 @@ function ArrangementsPreview({
                 pausedAt: nextStatus === "paused" ? now : null,
                 aiAction: nextAiAction,
                 aiSummary:
-                  sourceType === "text"
+                  isAiDerivedSource
                     ? nextAiSummary || primaryTarget.aiSummary
                     : primaryTarget.aiSummary,
                 aiRelatedArrangementTitles: nextAiRelatedArrangementTitles,
                 aiProcessedAt:
-                  sourceType === "text"
+                  isAiDerivedSource
                     ? now
                     : primaryTarget.aiProcessedAt,
                 updateAt: now,
@@ -4079,10 +4893,10 @@ function ArrangementsPreview({
         status: nextOpenStatus,
         completedAt: null,
         pausedAt: null,
-        aiAction: sourceType === "text" ? pendingAiAction ?? "create" : null,
-        aiSummary: sourceType === "text" ? nextAiSummary : "",
+        aiAction: isAiDerivedSource ? pendingAiAction ?? "create" : null,
+        aiSummary: isAiDerivedSource ? nextAiSummary : "",
         aiRelatedArrangementTitles: [],
-        aiProcessedAt: sourceType === "text" ? now : null,
+        aiProcessedAt: isAiDerivedSource ? now : null,
         createAt: now,
         updateAt: now,
       };
@@ -4143,7 +4957,7 @@ function ArrangementsPreview({
       );
       setAiResult(enhancedResult);
     } catch (error) {
-      setAiError(error instanceof Error ? error.message : "璇嗗埆澶辫触锛岃绋嶅悗閲嶈瘯");
+      setAiError(error instanceof Error ? error.message : "识别失败，请稍后重试");
     } finally {
       setAiLoading(false);
     }
@@ -4192,6 +5006,8 @@ function ArrangementsPreview({
         onPause={() => changeStatus(activeArrangement.uid, "paused")}
         onRestore={() => changeStatus(activeArrangement.uid, "todo")}
         onDelete={() => deleteArrangement(activeArrangement.uid)}
+        onOpenSourceRecord={onOpenSourceRecord}
+        onOpenSourceConversation={onOpenSourceConversation}
         relatedArrangementTitles={activeArrangement.aiRelatedArrangementTitles.filter(
           (title) => title !== activeArrangement.title
         )}
@@ -4214,6 +5030,7 @@ function ArrangementsPreview({
         onBack={() => {
           setShowAiRecognizer(false);
           resetAiRecognizer();
+          clearConversationSourceDraft();
         }}
         onCreateDraft={() => {
           if (!aiResult) return;
@@ -4240,7 +5057,7 @@ function ArrangementsPreview({
           title={
             editingArrangement
               ? "\u7f16\u8f91\u5b89\u6392"
-              : sourceType === "text"
+              : sourceType === "text" || sourceType === "conversation"
                 ? "\u786e\u8ba4\u8349\u7a3f"
                 : "\u6dfb\u52a0\u5b89\u6392"
           }
@@ -4261,11 +5078,13 @@ function ArrangementsPreview({
         />
         <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-5 pt-2">
           <article className="rounded-[12px] border border-[var(--record-card-border)] bg-[var(--record-card-bg)] px-3 py-4 shadow-[var(--mine-card-shadow)]">
-            {sourceType === "text" && (
+            {(sourceType === "text" || sourceType === "conversation") && (
               <div className="mb-3 rounded-[12px] bg-primary-soft px-3 py-3 text-sm leading-6 text-primary">
                 <p>
                   {saveHint ||
-                    "\u8fd9\u662f\u4e00\u6761\u7531 AI \u6587\u672c\u8bc6\u522b\u751f\u6210\u7684\u5b89\u6392\u8349\u7a3f\uff0c\u4fdd\u5b58\u524d\u53ef\u4ee5\u7ee7\u7eed\u4fee\u6539\u3002"}
+                    (sourceType === "conversation"
+                      ? "\u8fd9\u662f\u4e00\u6761\u7531\u804a\u5929\u6d88\u606f\u8bc6\u522b\u51fa\u7684\u5b89\u6392\u8349\u7a3f\uff0c\u4fdd\u5b58\u524d\u53ef\u4ee5\u7ee7\u7eed\u4fee\u6539\u3002"
+                      : "\u8fd9\u662f\u4e00\u6761\u7531 AI \u6587\u672c\u8bc6\u522b\u751f\u6210\u7684\u5b89\u6392\u8349\u7a3f\uff0c\u4fdd\u5b58\u524d\u53ef\u4ee5\u7ee7\u7eed\u4fee\u6539\u3002")}
                 </p>
                 {pendingOptimizationSummary && (
                   <p className="mt-1 text-xs leading-5 text-primary/80">
@@ -4307,6 +5126,7 @@ function ArrangementsPreview({
               tagsText={tagsText}
               checklistText={checklistText}
               completionCriteria={completionCriteria}
+              sourceConversation={sourceConversation}
               sourceText={sourceText}
               canSubmit={canSubmit}
               submitLabel={"\u4fdd\u5b58"}
@@ -4335,29 +5155,55 @@ function ArrangementsPreview({
   }
 
   return (
-    <div className="flex h-full flex-col bg-bg">
+    <div className="relative flex h-full flex-col bg-bg">
       <ArrangementPageHeader
-        title={"\u5b89\u6392"}
+        title={formatArrangementDateKeyLabel(filters.selectedDateKeys)}
         rightAction={
-          <button
-            type="button"
-            className="flex h-10 w-10 items-center justify-center rounded-full text-text transition hover:bg-hover-overlay active:scale-[0.96]"
-            onClick={openCreateForm}
-            aria-label={"\u624b\u52a8\u6dfb\u52a0\u5b89\u6392"}
-          >
-            <svg
-              className="h-5 w-5"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              className={cn(
+                "flex h-10 w-10 items-center justify-center rounded-full transition hover:bg-hover-overlay active:scale-[0.96]",
+                showFilters ? "text-primary" : "text-text"
+              )}
+              onClick={() => setShowFilters(true)}
+              aria-label="筛选安排"
             >
-              <path d="M12 5v14M5 12h14" />
-            </svg>
-          </button>
+              <svg
+                className="h-5 w-5"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M4 6h16" />
+                <path d="M7 12h10" />
+                <path d="M10 18h4" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              className="flex h-10 w-10 items-center justify-center rounded-full text-text transition hover:bg-hover-overlay active:scale-[0.96]"
+              onClick={openCreateForm}
+              aria-label={"\u624b\u52a8\u6dfb\u52a0\u5b89\u6392"}
+            >
+              <svg
+                className="h-5 w-5"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+            </button>
+          </div>
         }
       />
       <header className="hidden">
@@ -4370,6 +5216,27 @@ function ArrangementsPreview({
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-24 pt-2">
+        {!showForm && (
+          <QuarterArrangementCalendar
+            arrangements={arrangements}
+            selectedDateKeys={filters.selectedDateKeys}
+            onClearDateSelection={() =>
+              setFilters((prev) => ({
+                ...prev,
+                selectedDateKeys: [],
+              }))
+            }
+            onSelectDate={(dateKey) =>
+              setFilters((prev) => ({
+                ...prev,
+                selectedDateKeys: prev.selectedDateKeys.includes(dateKey)
+                  ? prev.selectedDateKeys.filter((item) => item !== dateKey)
+                  : [...prev.selectedDateKeys, dateKey],
+              }))
+            }
+          />
+        )}
+
         {showForm && (
           <section className="rounded-[12px] border border-[var(--record-card-border)] bg-[var(--record-card-bg)] px-3 py-3 shadow-[var(--mine-card-shadow)]">
             <div className="flex items-center justify-between">
@@ -4391,6 +5258,7 @@ function ArrangementsPreview({
               tagsText={tagsText}
               checklistText={checklistText}
               completionCriteria={completionCriteria}
+              sourceConversation={sourceConversation}
               sourceText={sourceText}
               canSubmit={canSubmit}
               submitLabel="保存"
@@ -4420,9 +5288,9 @@ function ArrangementsPreview({
           </p>
         )}
 
-        {!showForm && sortedArrangements.length > 0 ? (
+        {!showForm && filteredArrangements.length > 0 ? (
           <section className={cn("space-y-2.5", showForm && "mt-3")}>
-            <div className="flex items-center gap-2 px-1 text-xs leading-5 text-text-tertiary">
+            <div className="flex items-center gap-2 px-1 text-sm leading-5 text-text-secondary">
               <span>{"\u5f85\u5904\u7406"} {todoCount}</span>
               <span>/</span>
               <span>{"\u5df2\u8fc7\u671f"} {expiredCount}</span>
@@ -4431,12 +5299,13 @@ function ArrangementsPreview({
               <span>/</span>
               <span>{"\u5b8c\u6210"} {completedCount}</span>
             </div>
-            {sortedArrangements.map((arrangement) => (
+            {filteredArrangements.map((arrangement) => (
               <ArrangementCard
                 key={arrangement.uid}
                 arrangement={arrangement}
                 now={nowTick}
                 onOpen={() => setActiveArrangementId(arrangement.uid)}
+                onChangeStatus={(status) => changeStatus(arrangement.uid, status)}
               />
             ))}
           </section>
@@ -4459,14 +5328,30 @@ function ArrangementsPreview({
                   <path d="M6 3h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" />
                 </svg>
               </div>
-              <h2 className="mt-4 text-[15px] font-semibold leading-5 text-text">
+              <h2 className="mt-4 text-[17px] font-semibold leading-6 text-text">
                 还没有安排              </h2>
-              <p className="mt-2 text-xs leading-5 text-text-muted">
+              <p className="mt-2 text-sm leading-6 text-text-muted">
                 点击下方文字输入，或使用右上角按钮手动添加安排。              </p>
             </div>
           </section>
         ) : null}
       </div>
+      {!showForm && showFilters && (
+        <ArrangementFilterPanel
+          filters={filters}
+          onChange={setFilters}
+          onClose={() => setShowFilters(false)}
+          onReset={() =>
+            setFilters({
+              status: "all",
+              priority: "all",
+              kind: "all",
+              timeRange: "quarter",
+              selectedDateKeys: [],
+            })
+          }
+        />
+      )}
       {!showForm && (
         <ChatInput
           onSubmit={createAiDraftFromInput}
@@ -4495,6 +5380,7 @@ function ArrangementForm({
   tagsText,
   checklistText,
   completionCriteria,
+  sourceConversation,
   sourceText,
   canSubmit,
   submitLabel,
@@ -4524,6 +5410,7 @@ function ArrangementForm({
   tagsText: string;
   checklistText: string;
   completionCriteria: string;
+  sourceConversation?: RecordSourceConversation | null;
   sourceText: string;
   canSubmit: boolean;
   submitLabel: string;
@@ -4717,6 +5604,18 @@ function ArrangementForm({
       </label>
 
       <label className="block">
+        {sourceConversation && (
+          <div className="mb-3 rounded-[12px] bg-surface-subtle px-3 py-3">
+            <div className="flex flex-wrap gap-2">
+              <span className="rounded-full bg-white px-2.5 py-1 text-[12px] font-medium leading-4 text-text">
+                {sourceConversation.conversationType === "private" ? "私聊来源" : "聊天来源"}
+              </span>
+              <span className="rounded-full bg-white px-2.5 py-1 text-[12px] font-medium leading-4 text-text">
+                {sourceConversation.label}
+              </span>
+            </div>
+          </div>
+        )}
         <span className="text-xs font-medium leading-4 text-text-muted">来源文本</span>
         <textarea
           value={sourceText}
@@ -4753,11 +5652,17 @@ function ArrangementCard({
   arrangement,
   now,
   onOpen,
+  onChangeStatus,
 }: {
   arrangement: ArrangementItem;
   now: number;
   onOpen: () => void;
+  onChangeStatus: (status: ArrangementStatus) => void;
 }) {
+  const [offsetX, setOffsetX] = React.useState(0);
+  const [dragging, setDragging] = React.useState(false);
+  const dragStartXRef = React.useRef<number | null>(null);
+  const revealedOffset = 92;
   const countdownLabel = formatArrangementCountdown(arrangement.scheduledAt, now);
   const countdownClass = getArrangementCountdownClass(
     arrangement.status,
@@ -4773,71 +5678,451 @@ function ArrangementCard({
     showPriority ? getArrangementPriorityLabel(arrangement.priority) : null,
     showLocation ? arrangement.location : null,
   ].filter((item): item is string => Boolean(item)).slice(0, 3);
+  const leftActions =
+    arrangement.status === "completed"
+      ? [{ key: "restore", label: "恢复", status: "todo" as ArrangementStatus, className: "bg-surface-subtle text-text" }]
+      : [{ key: "pause", label: arrangement.status === "paused" ? "恢复" : "暂缓", status: arrangement.status === "paused" ? "todo" as ArrangementStatus : "paused" as ArrangementStatus, className: "bg-[#FFF4D6] text-[#A05A00]" }];
+  const rightActions =
+    arrangement.status === "completed"
+      ? []
+      : [
+          { key: "complete", label: "完成", status: "completed" as ArrangementStatus, className: "bg-[#DCFCE7] text-[#166534]" },
+          ...(arrangement.status === "paused"
+            ? [{ key: "restore", label: "恢复", status: "todo" as ArrangementStatus, className: "bg-primary-soft text-primary" }]
+            : arrangement.status === "expired"
+              ? [{ key: "restore", label: "恢复", status: "todo" as ArrangementStatus, className: "bg-primary-soft text-primary" }]
+              : []),
+        ];
+
+  const resetSwipe = React.useCallback(() => {
+    dragStartXRef.current = null;
+    setDragging(false);
+    setOffsetX(0);
+  }, []);
+
+  const handlePointerStart = (clientX: number) => {
+    dragStartXRef.current = clientX;
+    setDragging(true);
+  };
+
+  const handlePointerMove = (clientX: number) => {
+    if (dragStartXRef.current === null) return;
+    const delta = clientX - dragStartXRef.current;
+    const maxOffset = delta > 0 ? revealedOffset : -revealedOffset;
+    setOffsetX(Math.max(Math.min(delta, revealedOffset), -revealedOffset));
+    if (Math.abs(delta) > Math.abs(maxOffset)) {
+      setOffsetX(maxOffset);
+    }
+  };
+
+  const handlePointerEnd = () => {
+    if (dragStartXRef.current === null) return;
+    setDragging(false);
+    if (offsetX <= -36 && rightActions.length > 0) {
+      setOffsetX(-revealedOffset);
+    } else if (offsetX >= 36 && leftActions.length > 0) {
+      setOffsetX(revealedOffset);
+    } else {
+      setOffsetX(0);
+    }
+    dragStartXRef.current = null;
+  };
 
   return (
-    <button
-      type="button"
-      className={cn(
-        "w-full rounded-[12px] border px-3 py-3 text-left shadow-[var(--mine-card-shadow)] transition active:scale-[0.99]",
-        getArrangementStatusCardClass(arrangement.status),
-        arrangement.status === "completed" && "opacity-70"
-      )}
-      onClick={onOpen}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span
+    <div className="relative overflow-hidden rounded-[12px]">
+      {leftActions.length > 0 && (
+        <div className="absolute inset-y-0 left-0 flex items-center gap-2 px-2">
+          {leftActions.map((action) => (
+            <button
+              key={action.key}
+              type="button"
               className={cn(
-                "h-2.5 w-2.5 shrink-0 rounded-full",
-                getArrangementStatusDotClass(arrangement.status)
+                "h-[76px] min-w-[76px] rounded-[12px] px-3 text-sm font-semibold shadow-[var(--mine-card-shadow)] transition active:scale-[0.98]",
+                action.className
               )}
-            />
-            <h2
-              className={cn(
-                "min-w-0 truncate text-[17px] font-semibold leading-6 text-text",
-                arrangement.status === "completed" && "line-through decoration-text-tertiary"
-              )}
+              onClick={() => {
+                onChangeStatus(action.status);
+                resetSwipe();
+              }}
             >
-              {arrangement.title}
-            </h2>
-          </div>
-          <p className="mt-1.5 line-clamp-2 text-[14px] leading-5 text-text">
-            {arrangement.content}
-          </p>
-          <div className="mt-2 flex flex-wrap items-center gap-1.5">
-            {metadataTags.map((tag) => {
-              const isPriorityTag =
-                showPriority && tag === getArrangementPriorityLabel(arrangement.priority);
-              return (
-                <span
-                  key={tag}
-                  className={cn(
-                    "max-w-[140px] truncate rounded-full px-2.5 py-1 text-[12px] leading-4",
-                    isPriorityTag
-                      ? getArrangementPriorityPillClass(arrangement.priority)
-                      : "bg-surface-subtle text-text-tertiary"
-                  )}
-                >
-                  {tag}
-                </span>
-              );
-            })}
-          </div>
-          {countdownLabel && (
-            <p className={cn("mt-2 text-[13px] font-semibold leading-5", countdownClass)}>
-              {countdownLabel}
+              {action.label}
+            </button>
+          ))}
+        </div>
+      )}
+      {rightActions.length > 0 && (
+        <div className="absolute inset-y-0 right-0 flex items-center gap-2 px-2">
+          {rightActions.map((action) => (
+            <button
+              key={action.key}
+              type="button"
+              className={cn(
+                "h-[76px] min-w-[76px] rounded-[12px] px-3 text-sm font-semibold shadow-[var(--mine-card-shadow)] transition active:scale-[0.98]",
+                action.className
+              )}
+              onClick={() => {
+                onChangeStatus(action.status);
+                resetSwipe();
+              }}
+            >
+              {action.label}
+            </button>
+          ))}
+        </div>
+      )}
+      <div
+        role="button"
+        tabIndex={0}
+        className={cn(
+          "relative z-[1] w-full rounded-[12px] border px-3 py-3 text-left shadow-[var(--mine-card-shadow)] transition active:scale-[0.99]",
+          getArrangementStatusCardClass(arrangement.status),
+          dragging ? "duration-75" : "duration-200"
+        )}
+        style={{ transform: `translateX(${offsetX}px)` }}
+        onClick={() => {
+          if (offsetX !== 0) {
+            resetSwipe();
+            return;
+          }
+          onOpen();
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            if (offsetX !== 0) {
+              resetSwipe();
+              return;
+            }
+            onOpen();
+          }
+        }}
+        onMouseDown={(event) => handlePointerStart(event.clientX)}
+        onMouseMove={(event) => {
+          if (!dragging) return;
+          handlePointerMove(event.clientX);
+        }}
+        onMouseUp={handlePointerEnd}
+        onMouseLeave={handlePointerEnd}
+        onTouchStart={(event) => handlePointerStart(event.touches[0]?.clientX ?? 0)}
+        onTouchMove={(event) => handlePointerMove(event.touches[0]?.clientX ?? 0)}
+        onTouchEnd={handlePointerEnd}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span
+                className={cn(
+                  "h-2.5 w-2.5 shrink-0 rounded-full",
+                  getArrangementStatusDotClass(arrangement.status)
+                )}
+              />
+              <h2
+                className={cn(
+                  "min-w-0 truncate text-[18px] font-semibold leading-6 text-text",
+                  arrangement.status === "completed" && "line-through decoration-text-tertiary"
+                )}
+              >
+                {arrangement.title}
+              </h2>
+            </div>
+            <p className="mt-1.5 line-clamp-2 text-[15px] leading-6 text-text">
+              {arrangement.content}
             </p>
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              {metadataTags.map((tag) => {
+                const isPriorityTag =
+                  showPriority && tag === getArrangementPriorityLabel(arrangement.priority);
+                return (
+                  <span
+                    key={tag}
+                    className={cn(
+                      "max-w-[140px] truncate rounded-full px-2.5 py-1 text-[13px] leading-4",
+                      isPriorityTag
+                        ? getArrangementPriorityPillClass(arrangement.priority)
+                        : "bg-surface-subtle text-text-tertiary"
+                    )}
+                  >
+                    {tag}
+                  </span>
+                );
+              })}
+            </div>
+            {countdownLabel && (
+              <p className={cn("mt-2 text-[14px] font-semibold leading-5", countdownClass)}>
+                {countdownLabel}
+              </p>
+            )}
+          </div>
+          <span className={cn(
+            "shrink-0 rounded-full px-2.5 py-1 text-[13px] font-medium leading-4",
+            getArrangementStatusPillClass(arrangement.status)
+          )}>
+            {getArrangementStatusLabel(arrangement.status)}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function QuarterArrangementCalendar({
+  arrangements,
+  selectedDateKeys,
+  onClearDateSelection,
+  onSelectDate,
+}: {
+  arrangements: ArrangementItem[];
+  selectedDateKeys: string[];
+  onClearDateSelection: () => void;
+  onSelectDate: (dateKey: string) => void;
+}) {
+  const today = new Date();
+  const quarterStartMonth = Math.floor(today.getMonth() / 3) * 3;
+  const startDate = new Date(today.getFullYear(), quarterStartMonth, 1);
+  const endDate = new Date(today.getFullYear(), quarterStartMonth + 3, 0);
+  const firstColumnDate = new Date(startDate);
+  const firstWeekdayOffset = (firstColumnDate.getDay() + 6) % 7;
+  firstColumnDate.setDate(startDate.getDate() - firstWeekdayOffset);
+  const lastColumnDate = new Date(endDate);
+  const lastWeekdayOffset = (lastColumnDate.getDay() + 6) % 7;
+  lastColumnDate.setDate(endDate.getDate() + (6 - lastWeekdayOffset));
+  const cells: Array<{
+    date: Date;
+    key: string;
+    monthLabel: string | null;
+    inQuarter: boolean;
+  }> = [];
+  const dayStats = new Map<string, number>();
+
+  arrangements.forEach((arrangement) => {
+    const key = toArrangementDateKey(arrangement.scheduledAt);
+    if (!key) return;
+    dayStats.set(
+      key,
+      Math.max(dayStats.get(key) ?? 0, getArrangementPriorityWeight(arrangement.priority))
+    );
+  });
+
+  const current = new Date(firstColumnDate);
+  let lastMonth = -1;
+  while (current <= lastColumnDate) {
+    const key = toArrangementDateKey(current.getTime())!;
+    const showMonth =
+      current.getDate() <= 7 &&
+      current.getMonth() !== lastMonth &&
+      current >= startDate &&
+      current <= endDate
+        ? current.getMonth()
+        : null;
+    cells.push({
+      date: new Date(current),
+      key,
+      monthLabel: showMonth === null ? null : `${showMonth + 1}月`,
+      inQuarter: current >= startDate && current <= endDate,
+    });
+    if (showMonth !== null) {
+      lastMonth = showMonth;
+    }
+    current.setDate(current.getDate() + 1);
+  }
+
+  const columns = Array.from({ length: Math.ceil(cells.length / 7) }, (_, columnIndex) =>
+    cells.slice(columnIndex * 7, columnIndex * 7 + 7)
+  );
+  const monthMarkers = columns
+    .map((column, index) => ({
+      index,
+      label: column.find((cell) => cell.monthLabel)?.monthLabel ?? null,
+    }))
+    .filter((item): item is { index: number; label: string } => Boolean(item.label));
+
+  const getCellClass = (key: string, inQuarter: boolean) => {
+    const level = dayStats.get(key) ?? 0;
+    if (!inQuarter) return "border-transparent bg-transparent";
+    if (level >= 4) return "border-[#B91C1C] bg-[#EF4444]";
+    if (level === 3) return "border-[#B45309] bg-[#F59E0B]";
+    if (level === 2) return "border-[#1D4ED8] bg-[#3B82F6]";
+    if (level === 1) return "border-[#15803D] bg-[#22C55E]";
+    return "border-[#C9CFD8] bg-[#F7F8FA]";
+  };
+
+  return (
+    <section className="mb-3 rounded-[14px] border border-[var(--record-card-border)] bg-[var(--record-card-bg)] px-3 py-3 shadow-[var(--mine-card-shadow)]">
+      <div className="flex items-center justify-end gap-3">
+        {selectedDateKeys.length > 0 && (
+          <button
+            type="button"
+            className="rounded-full bg-primary-soft px-2.5 py-1 text-xs leading-4 text-primary"
+            onClick={onClearDateSelection}
+          >
+            清除日期筛选
+          </button>
+        )}
+      </div>
+      <div className="mt-3">
+        <div
+          className="grid gap-x-1 text-[12px] leading-4 text-text-tertiary"
+          style={{ gridTemplateColumns: `repeat(${columns.length}, minmax(0, 1fr))` }}
+        >
+          {monthMarkers.map((item) => (
+            <div
+              key={`${item.label}-${item.index}`}
+              className="justify-self-start"
+              style={{ gridColumnStart: item.index + 1 }}
+            >
+              {item.label}
+            </div>
+          ))}
+        </div>
+        <div
+          className="mt-2 grid gap-x-1 gap-y-1"
+          style={{ gridTemplateColumns: `repeat(${columns.length}, minmax(0, 1fr))` }}
+        >
+          {Array.from({ length: 7 }, (_, rowIndex) =>
+            columns.map((column, columnIndex) => {
+              const cell = column[rowIndex];
+              if (!cell) {
+                return <div key={`empty-${columnIndex}-${rowIndex}`} className="aspect-square w-full" />;
+              }
+              const selected = selectedDateKeys.includes(cell.key);
+              return (
+                <button
+                  key={cell.key}
+                  type="button"
+                  className={cn(
+                    "aspect-square w-full rounded-[3px] border transition hover:scale-[1.02]",
+                    selected && cell.inQuarter
+                      ? "ring-1 ring-primary ring-offset-1 ring-offset-[var(--record-card-bg)]"
+                      : "",
+                    cell.inQuarter && dayStats.get(cell.key) ? "shadow-[inset_0_0_0_1px_rgba(255,255,255,0.2)]" : "",
+                    getCellClass(cell.key, cell.inQuarter)
+                  )}
+                  title={cell.key}
+                  onClick={() => cell.inQuarter && onSelectDate(cell.key)}
+                />
+              );
+            })
           )}
         </div>
-        <span className={cn(
-          "shrink-0 rounded-full px-2.5 py-1 text-xs font-medium leading-4",
-          getArrangementStatusPillClass(arrangement.status)
-        )}>
-          {getArrangementStatusLabel(arrangement.status)}
-        </span>
       </div>
-    </button>
+    </section>
+  );
+}
+
+function ArrangementFilterPanel({
+  filters,
+  onChange,
+  onClose,
+  onReset,
+}: {
+  filters: ArrangementFilterState;
+  onChange: React.Dispatch<React.SetStateAction<ArrangementFilterState>>;
+  onClose: () => void;
+  onReset: () => void;
+}) {
+  return (
+    <div className="absolute inset-0 z-40 bg-black/20 px-3 py-16 backdrop-blur-[1px]">
+      <button type="button" className="absolute inset-0" aria-label="关闭筛选" onClick={onClose} />
+      <section className="relative mx-auto max-w-[420px] rounded-[18px] border border-[var(--record-card-border)] bg-[var(--record-card-bg)] px-4 py-4 shadow-[var(--mine-card-shadow)]">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold leading-5 text-text">筛选安排</p>
+            <p className="mt-1 text-sm leading-5 text-text-muted">
+              按时间、状态、重要性和类型组合查看安排。
+            </p>
+          </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            className="inline-flex min-w-[56px] items-center justify-center rounded-full bg-surface-subtle px-3 py-1.5 text-sm leading-4 text-text-tertiary"
+            onClick={onReset}
+          >
+            重置
+          </button>
+          <button
+            type="button"
+            className="inline-flex min-w-[56px] items-center justify-center rounded-full bg-primary-soft px-3 py-1.5 text-sm leading-4 text-primary"
+            onClick={onClose}
+          >
+            完成
+            </button>
+          </div>
+        </div>
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          {[
+            {
+              label: "状态",
+              value: filters.status,
+              options: [
+                ["all", "全部"],
+                ["todo", "待处理"],
+                ["paused", "暂缓"],
+                ["completed", "完成"],
+                ["expired", "已过期"],
+              ],
+              key: "status",
+            },
+            {
+              label: "重要性",
+              value: filters.priority,
+              options: [
+                ["all", "全部"],
+                ["urgent", "紧急"],
+                ["important", "重要"],
+                ["normal", "普通"],
+                ["low", "低"],
+              ],
+              key: "priority",
+            },
+            {
+              label: "类型",
+              value: filters.kind,
+              options: [
+                ["all", "全部"],
+                ["task", "任务"],
+                ["schedule", "日程"],
+                ["reminder", "提醒"],
+                ["note", "备注"],
+              ],
+              key: "kind",
+            },
+            {
+              label: "时间",
+              value: filters.timeRange,
+              options: [
+                ["all", "全部"],
+                ["quarter", "本季度"],
+                ["today", "今天"],
+                ["week", "7天内"],
+                ["month", "30天内"],
+                ["overdue", "已过期"],
+              ],
+              key: "timeRange",
+            },
+          ].map((item) => (
+            <label key={item.key} className="rounded-[12px] bg-surface px-3 py-2">
+              <span className="text-xs leading-4 text-text-tertiary">{item.label}</span>
+              <select
+                value={item.value}
+                onChange={(event) =>
+                  onChange((prev) => ({
+                    ...prev,
+                    [item.key]: event.target.value,
+                  }))
+                }
+                className="mt-1 w-full bg-transparent text-sm leading-5 text-text outline-none"
+              >
+                {item.options.map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ))}
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -4920,6 +6205,8 @@ function ArrangementDetailView({
   onPause,
   onRestore,
   onDelete,
+  onOpenSourceRecord,
+  onOpenSourceConversation,
 }: {
   arrangement: ArrangementItem;
   relatedArrangementTitles: string[];
@@ -4955,7 +6242,15 @@ function ArrangementDetailView({
   onPause: () => void;
   onRestore: () => void;
   onDelete: () => void;
+  onOpenSourceRecord: (record: RecordItem) => void;
+  onOpenSourceConversation: (source: RecordSourceConversation) => void;
 }) {
+  const conversationSource =
+    arrangement.sources.find((item) => item.type === "conversation" && item.sourceRecord) ??
+    (arrangement.source.type === "conversation" && arrangement.source.sourceRecord
+      ? arrangement.source
+      : null);
+
   return (
     <div className="flex h-full flex-col bg-bg">
       <ArrangementPageHeader
@@ -5127,6 +6422,52 @@ function ArrangementDetailView({
                       .join("；")
                   }
                 />
+                {conversationSource?.sourceRecord && (
+                  <ArrangementDetailRow
+                    label="来源消息"
+                    value={
+                      <button
+                        type="button"
+                        className="inline-flex items-center rounded-[8px] bg-primary-soft px-2.5 py-1 text-[12px] font-medium leading-4 text-primary transition active:scale-[0.98]"
+                        onClick={() => {
+                          if (conversationSource.sourceConversation) {
+                            onOpenSourceConversation({
+                              ...conversationSource.sourceConversation,
+                              recordUid:
+                                conversationSource.sourceRecord?.uid ??
+                                conversationSource.sourceConversation.recordUid,
+                            });
+                            return;
+                          }
+                          onOpenSourceRecord({
+                            ...conversationSource.sourceRecord!,
+                            ...(conversationSource.sourceConversation
+                              ? { sourceConversation: conversationSource.sourceConversation }
+                              : {}),
+                          });
+                        }}
+                      >
+                        定位原消息
+                      </button>
+                    }
+                  />
+                )}
+                {conversationSource?.sourceConversation && (
+                  <ArrangementDetailRow
+                    label="来源会话"
+                    value={
+                      <button
+                        type="button"
+                        className="inline-flex items-center rounded-[8px] bg-surface-subtle px-2.5 py-1 text-[12px] font-medium leading-4 text-text transition active:scale-[0.98]"
+                        onClick={() =>
+                          onOpenSourceConversation(conversationSource.sourceConversation!)
+                        }
+                      >
+                        {conversationSource.sourceConversation.label}
+                      </button>
+                    }
+                  />
+                )}
                 {arrangement.aiAction && (
                   <ArrangementDetailRow
                     label="AI处理"
@@ -5205,11 +6546,11 @@ function ArrangementDetailView({
   );
 }
 
-function ArrangementDetailRow({ label, value }: { label: string; value: string }) {
+function ArrangementDetailRow({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="flex items-start gap-3">
       <span className="w-[72px] shrink-0 text-text-tertiary">{label}</span>
-      <span className="min-w-0 flex-1 text-text">{value}</span>
+      <div className="min-w-0 flex-1 text-text">{value}</div>
     </div>
   );
 }
@@ -5257,7 +6598,7 @@ function ArrangementAiRecognizerView({
   return (
     <div className="flex h-full flex-col bg-bg">
       <ArrangementPageHeader
-        title="\u0041\u0049\u6587\u672c\u8bc6\u522b"
+        title="AI文本识别"
         onBack={onBack}
         rightAction={
           <button
@@ -5266,7 +6607,7 @@ function ArrangementAiRecognizerView({
             disabled={!canSubmit || !isConfigured}
             className="flex h-10 min-w-10 items-center justify-center rounded-full px-3 text-sm font-semibold text-primary transition hover:bg-hover-overlay active:scale-[0.96] disabled:opacity-35"
           >
-            {isLoading ? "\u8bc6\u522b\u4e2d" : "\u5f00\u59cb\u8bc6\u522b"}
+            {isLoading ? "识别中" : "开始识别"}
           </button>
         }
       />
@@ -5704,8 +7045,8 @@ function AboutScreen({ onBack }: { onBack: () => void }) {
   ];
   const footerRecords = [
     "ICP备案号：鄂ICP备2024037215号",
-    "澧炲€肩數淇′笟鍔＄粡钀ヨ鍙瘉锛氶剛B2-20240478",
-    "妯″瀷鍚嶇О锛欴eepSeek-R1",
+    "增值电信业务经营许可证：鄂B2-20240478",
+    "模型名称：DeepSeek-R1",
     "互联网信息服务算法备案号：网信算备330110507206401230035号",
     "软著：软著登字第14519261号",
     "森奇思(武汉)科技有限公司",
@@ -5877,7 +7218,7 @@ function SettingsScreen({
       <div className="min-h-0 flex-1 overflow-y-auto px-2.5 py-3">
         <div className="overflow-hidden rounded-[12px] bg-surface">
           <SettingsListItem
-            title="AI 妯″瀷"
+            title="AI 模型"
             description={aiConfigDescription}
             onClick={onOpenArrangementAi}
           />
@@ -6206,6 +7547,168 @@ function LanguageSheet({ onClose }: { onClose: () => void }) {
             );
           })}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function ChatArrangementScreen({
+  summary,
+  settings,
+  relatedArrangements,
+  onBack,
+  onChangeSettings,
+  onOpenArrangement,
+}: {
+  summary: TestConversationSummary;
+  settings: ChatArrangementSettings;
+  relatedArrangements: ArrangementItem[];
+  onBack: () => void;
+  onChangeSettings: React.Dispatch<React.SetStateAction<ChatArrangementSettings>>;
+  onOpenArrangement: (uid: string) => void;
+}) {
+  return (
+    <div className="flex h-full flex-col bg-bg">
+      <ArrangementPageHeader title="聊天功能" onBack={onBack} />
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-5 pt-2">
+        <section className="rounded-[14px] border border-[var(--record-card-border)] bg-[var(--record-card-bg)] px-3 py-3 shadow-[var(--mine-card-shadow)]">
+          <p className="text-sm font-semibold leading-5 text-text">当前聊天</p>
+          <p className="mt-1 text-xs leading-5 text-text-muted">
+            {summary.title} · {summary.conversationType === "group" ? "群聊" : "私聊"}
+          </p>
+        </section>
+
+        <section className="mt-3 rounded-[14px] border border-[var(--record-card-border)] bg-[var(--record-card-bg)] px-3 py-3 shadow-[var(--mine-card-shadow)]">
+          <p className="text-sm font-semibold leading-5 text-text">相关安排</p>
+          <p className="mt-1 text-xs leading-5 text-text-muted">
+            查看当前聊天来源下已经生成过的安排。
+          </p>
+          <div className="mt-3 space-y-2">
+            {relatedArrangements.length > 0 ? (
+              relatedArrangements.map((arrangement) => (
+                <button
+                  key={arrangement.uid}
+                  type="button"
+                  className="w-full rounded-[12px] bg-surface px-3 py-3 text-left transition active:scale-[0.99]"
+                  onClick={() => onOpenArrangement(arrangement.uid)}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="min-w-0 truncate text-sm font-semibold leading-5 text-text">
+                      {arrangement.title}
+                    </p>
+                    <span
+                      className={cn(
+                        "rounded-full px-2 py-0.5 text-[11px] leading-4",
+                        getArrangementStatusPillClass(arrangement.status)
+                      )}
+                    >
+                      {getArrangementStatusLabel(arrangement.status)}
+                    </span>
+                  </div>
+                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-text-muted">
+                    {arrangement.content}
+                  </p>
+                </button>
+              ))
+            ) : (
+              <div className="rounded-[12px] bg-surface px-3 py-3 text-xs leading-5 text-text-muted">
+                当前聊天还没有关联安排。
+              </div>
+            )}
+          </div>
+        </section>
+
+        <section className="mt-3 rounded-[14px] border border-[var(--record-card-border)] bg-[var(--record-card-bg)] px-3 py-3 shadow-[var(--mine-card-shadow)]">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-sm font-semibold leading-5 text-text">
+                根据对话上下文自动判断完成安排状态
+              </p>
+              <p className="mt-1 text-xs leading-5 text-text-muted">
+                开启后，有新消息进入时会在后台判断是否应将相关安排标记为完成。
+              </p>
+            </div>
+            <button
+              type="button"
+              aria-pressed={settings.enableAutoComplete}
+              className={cn(
+                "relative mt-0.5 flex h-7 w-12 shrink-0 items-center rounded-full transition",
+                settings.enableAutoComplete ? "bg-primary" : "bg-fill-2"
+              )}
+              onClick={() =>
+                onChangeSettings((prev) => ({
+                  ...prev,
+                  enableAutoComplete: !prev.enableAutoComplete,
+                }))
+              }
+            >
+              <span
+                className={cn(
+                  "h-5 w-5 rounded-full bg-white shadow transition",
+                  settings.enableAutoComplete ? "translate-x-6" : "translate-x-1"
+                )}
+              />
+            </button>
+          </div>
+        </section>
+
+        {summary.conversationType === "group" && (
+          <section className="mt-3 rounded-[14px] border border-[var(--record-card-border)] bg-[var(--record-card-bg)] px-3 py-3 shadow-[var(--mine-card-shadow)]">
+            <p className="text-sm font-semibold leading-5 text-text">群聊展示范围策略</p>
+            <p className="mt-1 text-xs leading-5 text-text-muted">
+              决定群聊消息识别时，是只保留和你相关的安排，还是允许保留群共享安排。
+            </p>
+            <div className="mt-3 space-y-2">
+              {[
+                {
+                  key: "selfOnly" as const,
+                  title: "只看自己相关",
+                  desc: "优先识别指向你、由你发出，或明确需要你执行的安排。",
+                },
+                {
+                  key: "all" as const,
+                  title: "看全群安排",
+                  desc: "群里的共享事项也允许进入安排，由你后续筛选确认。",
+                },
+              ].map((option) => {
+                const active = settings.groupDisplayScope === option.key;
+                return (
+                  <button
+                    key={option.key}
+                    type="button"
+                    className={cn(
+                      "flex w-full items-start gap-3 rounded-[12px] border px-3 py-3 text-left transition active:scale-[0.99]",
+                      active
+                        ? "border-primary bg-primary-soft"
+                        : "border-border-light bg-surface"
+                    )}
+                    onClick={() =>
+                      onChangeSettings((prev) => ({
+                        ...prev,
+                        groupDisplayScope: option.key,
+                      }))
+                    }
+                  >
+                    <span
+                      className={cn(
+                        "mt-0.5 flex h-4 w-4 shrink-0 rounded-full border",
+                        active ? "border-primary bg-primary" : "border-border"
+                      )}
+                    />
+                    <span className="min-w-0">
+                      <span className="block text-sm font-medium leading-5 text-text">
+                        {option.title}
+                      </span>
+                      <span className="mt-1 block text-xs leading-5 text-text-muted">
+                        {option.desc}
+                      </span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        )}
       </div>
     </div>
   );
