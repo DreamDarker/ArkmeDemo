@@ -132,6 +132,14 @@ type ArrangementAiConfig = {
 type ArrangementAiConfidence = "low" | "medium" | "high";
 type ArrangementAiAction = "create" | "update" | "complete" | "merge";
 type ArrangementExecutionLevel = "manual_only" | "ai_assist" | "ai_auto";
+type ArrangementReminderPreset =
+  | "at_time"
+  | "10m_before"
+  | "1h_before"
+  | "1d_before"
+  | "custom";
+type ArrangementReminderRepeat = "none" | "daily" | "weekly";
+type ArrangementReminderState = "idle" | "triggered" | "read" | "ignored" | "snoozed";
 
 type ArrangementCompletionSuggestion = {
   reason: string;
@@ -272,6 +280,13 @@ type ArrangementItem = {
   sources: ArrangementSource[];
   mergeGroupId: string | null;
   scheduledAt: number | null;
+  reminderEnabled: boolean;
+  reminderPreset: ArrangementReminderPreset;
+  reminderRepeat: ArrangementReminderRepeat;
+  reminderCustomAt: number | null;
+  reminderNextAt: number | null;
+  reminderLastTriggeredAt: number | null;
+  reminderState: ArrangementReminderState;
   status: ArrangementStatus;
   completedAt: number | null;
   pausedAt: number | null;
@@ -553,6 +568,23 @@ function normalizeStoredArrangement(value: unknown): ArrangementItem | null {
     typeof arrangement.pausedAt === "number" && Number.isFinite(arrangement.pausedAt)
       ? arrangement.pausedAt
       : null;
+  const reminderEnabled = arrangement.reminderEnabled === true;
+  const reminderPreset = normalizeArrangementReminderPreset(arrangement.reminderPreset);
+  const reminderRepeat = normalizeArrangementReminderRepeat(arrangement.reminderRepeat);
+  const reminderCustomAt =
+    typeof arrangement.reminderCustomAt === "number" && Number.isFinite(arrangement.reminderCustomAt)
+      ? arrangement.reminderCustomAt
+      : null;
+  const reminderNextAtStored =
+    typeof arrangement.reminderNextAt === "number" && Number.isFinite(arrangement.reminderNextAt)
+      ? arrangement.reminderNextAt
+      : null;
+  const reminderLastTriggeredAt =
+    typeof arrangement.reminderLastTriggeredAt === "number" &&
+    Number.isFinite(arrangement.reminderLastTriggeredAt)
+      ? arrangement.reminderLastTriggeredAt
+      : null;
+  const reminderState = normalizeArrangementReminderState(arrangement.reminderState);
   const kind: ArrangementKind =
     arrangement.kind === "schedule" ||
     arrangement.kind === "reminder" ||
@@ -589,6 +621,22 @@ function normalizeStoredArrangement(value: unknown): ArrangementItem | null {
         ? arrangement.mergeGroupId.trim()
         : null,
     scheduledAt,
+    reminderEnabled,
+    reminderPreset,
+    reminderRepeat,
+    reminderCustomAt,
+    reminderNextAt:
+      reminderState === "snoozed"
+        ? reminderNextAtStored
+        : resolveArrangementReminderNextAt({
+            reminderEnabled,
+            reminderPreset,
+            reminderRepeat,
+            reminderCustomAt,
+            scheduledAt,
+          }) ?? reminderNextAtStored,
+    reminderLastTriggeredAt,
+    reminderState,
     status: normalizedStatus,
     completedAt,
     pausedAt,
@@ -703,6 +751,28 @@ function getArrangementPriorityPillClass(priority: ArrangementPriority) {
     return "bg-surface-subtle text-text-tertiary";
   }
   return "bg-primary-soft text-primary";
+}
+
+function getArrangementReminderPresetLabel(preset: ArrangementReminderPreset) {
+  if (preset === "10m_before") return "提前10分钟";
+  if (preset === "1h_before") return "提前1小时";
+  if (preset === "1d_before") return "提前1天";
+  if (preset === "custom") return "自定义提醒";
+  return "到时提醒";
+}
+
+function getArrangementReminderRepeatLabel(repeat: ArrangementReminderRepeat) {
+  if (repeat === "daily") return "每天重复";
+  if (repeat === "weekly") return "每周重复";
+  return "单次提醒";
+}
+
+function getArrangementReminderStateLabel(state: ArrangementReminderState) {
+  if (state === "triggered") return "待处理";
+  if (state === "read") return "已读";
+  if (state === "ignored") return "已忽略";
+  if (state === "snoozed") return "稍后提醒";
+  return "等待触发";
 }
 
 function getArrangementAiActionLabel(action: ArrangementAiAction | null) {
@@ -826,6 +896,30 @@ function normalizeArrangementAiConfidence(value: unknown): ArrangementAiConfiden
 function normalizeArrangementExecutionLevel(value: unknown): ArrangementExecutionLevel {
   if (value === "ai_assist" || value === "ai_auto") return value;
   return "manual_only";
+}
+
+function normalizeArrangementReminderPreset(value: unknown): ArrangementReminderPreset {
+  if (
+    value === "10m_before" ||
+    value === "1h_before" ||
+    value === "1d_before" ||
+    value === "custom"
+  ) {
+    return value;
+  }
+  return "at_time";
+}
+
+function normalizeArrangementReminderRepeat(value: unknown): ArrangementReminderRepeat {
+  if (value === "daily" || value === "weekly") return value;
+  return "none";
+}
+
+function normalizeArrangementReminderState(value: unknown): ArrangementReminderState {
+  if (value === "triggered" || value === "read" || value === "ignored" || value === "snoozed") {
+    return value;
+  }
+  return "idle";
 }
 
 function normalizeArrangementExecutionRisk(value: unknown): ArrangementExecutionRisk {
@@ -1174,6 +1268,10 @@ function toArrangementDateKey(timestamp: number | null) {
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+function getArrangementTimelineAt(arrangement: ArrangementItem) {
+  return arrangement.scheduledAt ?? arrangement.reminderNextAt;
 }
 
 function getCurrentQuarterRange(referenceTime: number) {
@@ -1681,6 +1779,62 @@ function parseArrangementScheduledTime(value: string) {
 
   const parsedValue = new Date(value).getTime();
   return Number.isFinite(parsedValue) ? parsedValue : null;
+}
+
+function getArrangementReminderOffsetMinutes(preset: ArrangementReminderPreset) {
+  if (preset === "10m_before") return 10;
+  if (preset === "1h_before") return 60;
+  if (preset === "1d_before") return 1440;
+  return 0;
+}
+
+function advanceReminderByRepeat(baseTime: number, repeat: ArrangementReminderRepeat, now: number) {
+  if (repeat === "none") return baseTime;
+
+  const interval = repeat === "daily" ? 24 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
+  let next = baseTime;
+  while (next <= now) {
+    next += interval;
+  }
+  return next;
+}
+
+function resolveArrangementReminderNextAt({
+  reminderEnabled,
+  reminderPreset,
+  reminderRepeat,
+  reminderCustomAt,
+  scheduledAt,
+  now = Date.now(),
+}: {
+  reminderEnabled: boolean;
+  reminderPreset: ArrangementReminderPreset;
+  reminderRepeat: ArrangementReminderRepeat;
+  reminderCustomAt: number | null;
+  scheduledAt: number | null;
+  now?: number;
+}) {
+  if (!reminderEnabled) return null;
+
+  const baseTime =
+    reminderPreset === "custom"
+      ? reminderCustomAt
+      : scheduledAt !== null
+        ? scheduledAt - getArrangementReminderOffsetMinutes(reminderPreset) * 60 * 1000
+        : reminderCustomAt;
+
+  if (baseTime === null) return null;
+  return reminderRepeat === "none" ? baseTime : advanceReminderByRepeat(baseTime, reminderRepeat, now);
+}
+
+function formatArrangementReminderSummary(arrangement: ArrangementItem) {
+  if (!arrangement.reminderEnabled) return "未开启";
+
+  const parts = [getArrangementReminderPresetLabel(arrangement.reminderPreset)];
+  if (arrangement.reminderRepeat !== "none") {
+    parts.push(getArrangementReminderRepeatLabel(arrangement.reminderRepeat));
+  }
+  return parts.join(" · ");
 }
 
 function getOpenArrangementStatus(scheduledAt: number | null, now = Date.now()): ArrangementStatus {
@@ -4794,6 +4948,12 @@ function ArrangementsPreview({
   const [title, setTitle] = React.useState("");
   const [content, setContent] = React.useState("");
   const [scheduledTime, setScheduledTime] = React.useState("");
+  const [reminderEnabled, setReminderEnabled] = React.useState(false);
+  const [reminderPreset, setReminderPreset] =
+    React.useState<ArrangementReminderPreset>("at_time");
+  const [reminderRepeat, setReminderRepeat] =
+    React.useState<ArrangementReminderRepeat>("none");
+  const [reminderCustomTime, setReminderCustomTime] = React.useState("");
   const [kind, setKind] = React.useState<ArrangementKind>("task");
   const [priority, setPriority] = React.useState<ArrangementPriority>("normal");
   const [location, setLocation] = React.useState("");
@@ -4834,7 +4994,10 @@ function ArrangementsPreview({
     arrangements.find((arrangement) => arrangement.uid === activeArrangementId) ?? null;
   const editingArrangement =
     arrangements.find((arrangement) => arrangement.uid === editingArrangementId) ?? null;
-  const canSubmit = title.trim().length > 0 && content.trim().length > 0;
+  const canSubmit =
+    title.trim().length > 0 &&
+    content.trim().length > 0 &&
+    (!reminderEnabled || !((reminderPreset === "custom" || !scheduledTime) && !reminderCustomTime));
   const canSubmitAiRecognition = aiInputText.trim().length > 0 && !aiLoading;
   const hasReadyAiConfig = isArrangementAiConfigReady(aiConfig);
   const pendingMergeTargets = React.useMemo(
@@ -4866,8 +5029,8 @@ function ArrangementsPreview({
         const rankDiff = statusRank[a.status] - statusRank[b.status];
         if (rankDiff !== 0) return rankDiff;
 
-        const timeA = a.scheduledAt ?? Number.MAX_SAFE_INTEGER;
-        const timeB = b.scheduledAt ?? Number.MAX_SAFE_INTEGER;
+        const timeA = getArrangementTimelineAt(a) ?? Number.MAX_SAFE_INTEGER;
+        const timeB = getArrangementTimelineAt(b) ?? Number.MAX_SAFE_INTEGER;
         if (timeA !== timeB) return timeA - timeB;
 
         return b.updateAt - a.updateAt;
@@ -4882,37 +5045,38 @@ function ArrangementsPreview({
     const quarterRange = getCurrentQuarterRange(nowTick);
 
     return sortedArrangements.filter((arrangement) => {
+      const timelineAt = getArrangementTimelineAt(arrangement);
       if (filters.status !== "all" && arrangement.status !== filters.status) return false;
       if (filters.priority !== "all" && arrangement.priority !== filters.priority) return false;
       if (filters.kind !== "all" && arrangement.kind !== filters.kind) return false;
       if (filters.selectedDateKeys.length > 0) {
-        const arrangementDateKey = toArrangementDateKey(arrangement.scheduledAt);
+        const arrangementDateKey = toArrangementDateKey(timelineAt);
         if (!arrangementDateKey || !filters.selectedDateKeys.includes(arrangementDateKey)) {
           return false;
         }
       }
       if (filters.timeRange === "quarter") {
         return (
-          arrangement.scheduledAt !== null &&
-          arrangement.scheduledAt >= quarterRange.start &&
-          arrangement.scheduledAt < quarterRange.end
+          timelineAt !== null &&
+          timelineAt >= quarterRange.start &&
+          timelineAt < quarterRange.end
         );
       }
       if (filters.timeRange === "today") {
         return (
-          arrangement.scheduledAt !== null &&
-          arrangement.scheduledAt >= todayStart &&
-          arrangement.scheduledAt < todayStart + 24 * 60 * 60 * 1000
+          timelineAt !== null &&
+          timelineAt >= todayStart &&
+          timelineAt < todayStart + 24 * 60 * 60 * 1000
         );
       }
       if (filters.timeRange === "week") {
-        return arrangement.scheduledAt !== null && arrangement.scheduledAt >= todayStart && arrangement.scheduledAt < weekEnd;
+        return timelineAt !== null && timelineAt >= todayStart && timelineAt < weekEnd;
       }
       if (filters.timeRange === "month") {
-        return arrangement.scheduledAt !== null && arrangement.scheduledAt >= todayStart && arrangement.scheduledAt < monthEnd;
+        return timelineAt !== null && timelineAt >= todayStart && timelineAt < monthEnd;
       }
       if (filters.timeRange === "overdue") {
-        return arrangement.scheduledAt !== null && arrangement.scheduledAt < todayStart && arrangement.status !== "completed";
+        return timelineAt !== null && timelineAt < todayStart && arrangement.status !== "completed";
       }
       return true;
     });
@@ -4926,6 +5090,9 @@ function ArrangementsPreview({
   );
   const pendingExecutionArrangements = arrangements.filter(
     (item) => item.pendingExecutionSuggestion
+  );
+  const pendingReminderArrangements = filteredArrangements.filter(
+    (item) => item.reminderEnabled && item.reminderState === "triggered"
   );
 
   React.useEffect(() => {
@@ -4967,10 +5134,44 @@ function ArrangementsPreview({
     }
   }, [arrangements, nowTick]);
 
+  React.useEffect(() => {
+    const now = Date.now();
+    const nextArrangements = arrangements.map((arrangement) => {
+      if (
+        !arrangement.reminderEnabled ||
+        arrangement.status === "completed" ||
+        arrangement.reminderNextAt === null ||
+        arrangement.reminderState === "triggered"
+      ) {
+        return arrangement;
+      }
+
+      if (arrangement.reminderNextAt > now) {
+        return arrangement;
+      }
+
+      return {
+        ...arrangement,
+        reminderState: "triggered" as ArrangementReminderState,
+        reminderLastTriggeredAt: now,
+        updateAt: now,
+      };
+    });
+
+    if (nextArrangements.some((arrangement, index) => arrangement !== arrangements[index])) {
+      persistNextArrangements(nextArrangements);
+      setSaveHint("有新的安排提醒待处理。");
+    }
+  }, [arrangements, nowTick]);
+
   const resetForm = () => {
     setTitle("");
     setContent("");
     setScheduledTime("");
+    setReminderEnabled(false);
+    setReminderPreset("at_time");
+    setReminderRepeat("none");
+    setReminderCustomTime("");
     setKind("task");
     setPriority("normal");
     setLocation("");
@@ -5112,6 +5313,10 @@ function ArrangementsPreview({
     setTitle(result.title || primaryTarget.title);
     setContent(result.content || primaryTarget.content);
     setScheduledTime(toDateTimeLocalValue(parsedScheduledAt));
+    setReminderEnabled(primaryTarget.reminderEnabled);
+    setReminderPreset(primaryTarget.reminderPreset);
+    setReminderRepeat(primaryTarget.reminderRepeat);
+    setReminderCustomTime(toDateTimeLocalValue(primaryTarget.reminderCustomAt));
     setKind(result.kind || primaryTarget.kind);
     setPriority(result.priority || primaryTarget.priority);
     setLocation(result.location || primaryTarget.location);
@@ -5155,6 +5360,10 @@ function ArrangementsPreview({
     setTitle(arrangement.title);
     setContent(arrangement.content);
     setScheduledTime(toDateTimeLocalValue(arrangement.scheduledAt));
+    setReminderEnabled(arrangement.reminderEnabled);
+    setReminderPreset(arrangement.reminderPreset);
+    setReminderRepeat(arrangement.reminderRepeat);
+    setReminderCustomTime(toDateTimeLocalValue(arrangement.reminderCustomAt));
     setKind(arrangement.kind);
     setPriority(arrangement.priority);
     setLocation(arrangement.location);
@@ -5203,6 +5412,10 @@ function ArrangementsPreview({
       parseArrangementScheduledTime(result.scheduledAt) ??
       inferScheduledAtFromNaturalLanguage(result.scheduledAtText || sourceOriginalText);
     setScheduledTime(toDateTimeLocalValue(parsedScheduledAt));
+    setReminderEnabled(result.kind === "reminder" || Boolean(parsedScheduledAt));
+    setReminderPreset("at_time");
+    setReminderRepeat("none");
+    setReminderCustomTime("");
     setKind(result.kind);
     setPriority(result.priority);
     setLocation(result.location);
@@ -5287,6 +5500,15 @@ function ArrangementsPreview({
 
     const now = Date.now();
     const scheduledAt = parseArrangementScheduledTime(scheduledTime);
+    const reminderCustomAt = parseArrangementScheduledTime(reminderCustomTime);
+    const nextReminderAt = resolveArrangementReminderNextAt({
+      reminderEnabled,
+      reminderPreset,
+      reminderRepeat,
+      reminderCustomAt,
+      scheduledAt,
+      now,
+    });
     const participants = parseArrangementTextList(participantsText);
     const tags = parseArrangementTextList(tagsText);
     const checklist = parseArrangementChecklist(checklistText, now);
@@ -5359,6 +5581,15 @@ function ArrangementsPreview({
                 sources: mergedSources,
                 mergeGroupId: nextMergeGroupId,
                 scheduledAt,
+                reminderEnabled,
+                reminderPreset,
+                reminderRepeat,
+                reminderCustomAt,
+                reminderNextAt: nextReminderAt,
+                reminderLastTriggeredAt: reminderEnabled ? arrangement.reminderLastTriggeredAt : null,
+                reminderState: reminderEnabled
+                  ? ("idle" as ArrangementReminderState)
+                  : ("read" as ArrangementReminderState),
                 status: nextStatus,
                 completedAt: nextStatus === "completed" ? now : null,
                 pausedAt: nextStatus === "paused" ? now : null,
@@ -5412,6 +5643,15 @@ function ArrangementsPreview({
         sources: [nextSource],
         mergeGroupId: null,
         scheduledAt,
+        reminderEnabled,
+        reminderPreset,
+        reminderRepeat,
+        reminderCustomAt,
+        reminderNextAt: nextReminderAt,
+        reminderLastTriggeredAt: null,
+        reminderState: reminderEnabled
+          ? ("idle" as ArrangementReminderState)
+          : ("read" as ArrangementReminderState),
         status: nextOpenStatus,
         completedAt: null,
         pausedAt: null,
@@ -5441,6 +5681,20 @@ function ArrangementsPreview({
     updateArrangement(uid, (arrangement) => ({
       ...arrangement,
       status: status === "todo" ? getOpenArrangementStatus(arrangement.scheduledAt, now) : status,
+      reminderNextAt:
+        status === "completed"
+          ? null
+          : arrangement.reminderEnabled && arrangement.reminderNextAt === null
+            ? resolveArrangementReminderNextAt({
+                reminderEnabled: arrangement.reminderEnabled,
+                reminderPreset: arrangement.reminderPreset,
+                reminderRepeat: arrangement.reminderRepeat,
+                reminderCustomAt: arrangement.reminderCustomAt,
+                scheduledAt: arrangement.scheduledAt,
+                now,
+              })
+            : arrangement.reminderNextAt,
+      reminderState: status === "completed" ? "read" : arrangement.reminderState,
       completedAt: status === "completed" ? now : null,
       pausedAt: status === "paused" ? now : null,
       pendingCompletionSuggestion: status === "completed" ? null : arrangement.pendingCompletionSuggestion,
@@ -5490,6 +5744,58 @@ function ArrangementsPreview({
       updateAt: now,
     }));
     setSaveHint("已撤回 AI 完成结果。");
+  };
+
+  const updateReminderAfterHandle = (
+    arrangement: ArrangementItem,
+    nextState: ArrangementReminderState,
+    now: number
+  ) => {
+    const baseNextAt =
+      arrangement.reminderNextAt ??
+      resolveArrangementReminderNextAt({
+        reminderEnabled: arrangement.reminderEnabled,
+        reminderPreset: arrangement.reminderPreset,
+        reminderRepeat: arrangement.reminderRepeat,
+        reminderCustomAt: arrangement.reminderCustomAt,
+        scheduledAt: arrangement.scheduledAt,
+        now,
+      });
+
+    const nextReminderAt =
+      arrangement.reminderRepeat === "none" || baseNextAt === null
+        ? null
+        : advanceReminderByRepeat(baseNextAt, arrangement.reminderRepeat, now);
+
+    return {
+      ...arrangement,
+      reminderState: nextState,
+      reminderNextAt: nextReminderAt,
+      updateAt: now,
+    };
+  };
+
+  const markReminderRead = (uid: string) => {
+    const now = Date.now();
+    updateArrangement(uid, (arrangement) => updateReminderAfterHandle(arrangement, "read", now));
+    setSaveHint("已标记这条提醒。");
+  };
+
+  const ignoreReminder = (uid: string) => {
+    const now = Date.now();
+    updateArrangement(uid, (arrangement) => updateReminderAfterHandle(arrangement, "ignored", now));
+    setSaveHint("已忽略本次提醒。");
+  };
+
+  const snoozeReminder = (uid: string, minutes = 10) => {
+    const now = Date.now();
+    updateArrangement(uid, (arrangement) => ({
+      ...arrangement,
+      reminderState: "snoozed",
+      reminderNextAt: now + minutes * 60 * 1000,
+      updateAt: now,
+    }));
+    setSaveHint(`已设置 ${minutes} 分钟后再次提醒。`);
   };
 
   const generateExecutionSuggestion = async (uid: string) => {
@@ -5594,6 +5900,14 @@ function ArrangementsPreview({
         suggestion.action === "reschedule" && suggestion.suggestedScheduledAt !== null
           ? suggestion.suggestedScheduledAt
           : arrangement.scheduledAt;
+      const nextReminderAt = resolveArrangementReminderNextAt({
+        reminderEnabled: arrangement.reminderEnabled,
+        reminderPreset: arrangement.reminderPreset,
+        reminderRepeat: arrangement.reminderRepeat,
+        reminderCustomAt: arrangement.reminderCustomAt,
+        scheduledAt: nextScheduledAt,
+        now,
+      });
 
       return {
         ...arrangement,
@@ -5601,6 +5915,7 @@ function ArrangementsPreview({
         checklist: nextChecklist,
         completionCriteria: nextCompletionCriteria,
         scheduledAt: nextScheduledAt,
+        reminderNextAt: arrangement.reminderEnabled ? nextReminderAt : null,
         aiSummary: suggestion.suggestedMessage || suggestion.summary || arrangement.aiSummary,
         aiProcessedAt: now,
         pendingExecutionSuggestion: null,
@@ -5640,6 +5955,16 @@ function ArrangementsPreview({
         checklist: record.previousChecklist,
         completionCriteria: record.previousCompletionCriteria,
         scheduledAt: record.previousScheduledAt,
+        reminderNextAt: arrangement.reminderEnabled
+          ? resolveArrangementReminderNextAt({
+              reminderEnabled: arrangement.reminderEnabled,
+              reminderPreset: arrangement.reminderPreset,
+              reminderRepeat: arrangement.reminderRepeat,
+              reminderCustomAt: arrangement.reminderCustomAt,
+              scheduledAt: record.previousScheduledAt,
+              now,
+            })
+          : null,
         aiSummary: record.previousAiSummary,
         lastExecutionRecord: {
           ...record,
@@ -5700,10 +6025,14 @@ function ArrangementsPreview({
       <ArrangementDetailView
         arrangement={activeArrangement}
         isEditing={showForm && editingArrangementId === activeArrangement.uid}
-        title={title}
-        content={content}
-        scheduledTime={scheduledTime}
-        kind={kind}
+              title={title}
+              content={content}
+              scheduledTime={scheduledTime}
+              reminderEnabled={reminderEnabled}
+              reminderPreset={reminderPreset}
+              reminderRepeat={reminderRepeat}
+              reminderCustomTime={reminderCustomTime}
+              kind={kind}
         priority={priority}
         location={location}
         participantsText={participantsText}
@@ -5726,6 +6055,10 @@ function ArrangementsPreview({
         onTitleChange={setTitle}
         onContentChange={setContent}
         onScheduledTimeChange={setScheduledTime}
+        onReminderEnabledChange={setReminderEnabled}
+        onReminderPresetChange={setReminderPreset}
+        onReminderRepeatChange={setReminderRepeat}
+        onReminderCustomTimeChange={setReminderCustomTime}
         onKindChange={setKind}
         onPriorityChange={setPriority}
         onLocationChange={setLocation}
@@ -5747,6 +6080,9 @@ function ArrangementsPreview({
         onDismissCompletionSuggestion={() => dismissCompletionSuggestion(activeArrangement.uid)}
         onRollbackAiCompletion={() => rollbackAiCompletion(activeArrangement.uid)}
         onRollbackAiExecution={() => rollbackAiExecution(activeArrangement.uid)}
+        onMarkReminderRead={() => markReminderRead(activeArrangement.uid)}
+        onIgnoreReminder={() => ignoreReminder(activeArrangement.uid)}
+        onSnoozeReminder={() => snoozeReminder(activeArrangement.uid)}
         onDelete={() => deleteArrangement(activeArrangement.uid)}
         onOpenSourceRecord={onOpenSourceRecord}
         onOpenSourceConversation={onOpenSourceConversation}
@@ -5861,6 +6197,10 @@ function ArrangementsPreview({
               title={title}
               content={content}
               scheduledTime={scheduledTime}
+              reminderEnabled={reminderEnabled}
+              reminderPreset={reminderPreset}
+              reminderRepeat={reminderRepeat}
+              reminderCustomTime={reminderCustomTime}
               kind={kind}
               priority={priority}
               location={location}
@@ -5881,6 +6221,10 @@ function ArrangementsPreview({
               onTitleChange={setTitle}
               onContentChange={setContent}
               onScheduledTimeChange={setScheduledTime}
+              onReminderEnabledChange={setReminderEnabled}
+              onReminderPresetChange={setReminderPreset}
+              onReminderRepeatChange={setReminderRepeat}
+              onReminderCustomTimeChange={setReminderCustomTime}
               onKindChange={setKind}
               onPriorityChange={setPriority}
               onLocationChange={setLocation}
@@ -5993,6 +6337,10 @@ function ArrangementsPreview({
               title={title}
               content={content}
               scheduledTime={scheduledTime}
+              reminderEnabled={reminderEnabled}
+              reminderPreset={reminderPreset}
+              reminderRepeat={reminderRepeat}
+              reminderCustomTime={reminderCustomTime}
               kind={kind}
               priority={priority}
               location={location}
@@ -6012,6 +6360,10 @@ function ArrangementsPreview({
               onTitleChange={setTitle}
               onContentChange={setContent}
               onScheduledTimeChange={setScheduledTime}
+              onReminderEnabledChange={setReminderEnabled}
+              onReminderPresetChange={setReminderPreset}
+              onReminderRepeatChange={setReminderRepeat}
+              onReminderCustomTimeChange={setReminderCustomTime}
               onKindChange={setKind}
               onPriorityChange={setPriority}
               onLocationChange={setLocation}
@@ -6028,6 +6380,26 @@ function ArrangementsPreview({
           <p className="mb-3 rounded-[10px] bg-primary-soft px-3 py-2 text-xs leading-4 text-primary">
             {saveHint}
           </p>
+        )}
+
+        {!showForm && pendingReminderArrangements.length > 0 && (
+          <section className="mb-3 rounded-[12px] border border-violet-200 bg-violet-50 px-3 py-3 shadow-[var(--mine-card-shadow)] dark:border-violet-900/50 dark:bg-violet-950/20">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold leading-5 text-text">待处理提醒</p>
+                <p className="mt-1 text-sm leading-5 text-text-muted">
+                  当前有 {pendingReminderArrangements.length} 条提醒已触发，建议优先处理。
+                </p>
+              </div>
+              <button
+                type="button"
+                className="shrink-0 rounded-full bg-white/80 px-3 py-1.5 text-sm font-medium leading-4 text-violet-700 transition active:scale-[0.98] dark:bg-violet-950/40 dark:text-violet-200"
+                onClick={() => setActiveArrangementId(pendingReminderArrangements[0]!.uid)}
+              >
+                查看
+              </button>
+            </div>
+          </section>
         )}
 
         {!showForm && pendingExecutionArrangements.length > 0 && (
@@ -6155,6 +6527,10 @@ function ArrangementForm({
   title,
   content,
   scheduledTime,
+  reminderEnabled,
+  reminderPreset,
+  reminderRepeat,
+  reminderCustomTime,
   kind,
   priority,
   location,
@@ -6172,6 +6548,10 @@ function ArrangementForm({
   onTitleChange,
   onContentChange,
   onScheduledTimeChange,
+  onReminderEnabledChange,
+  onReminderPresetChange,
+  onReminderRepeatChange,
+  onReminderCustomTimeChange,
   onKindChange,
   onPriorityChange,
   onLocationChange,
@@ -6185,6 +6565,10 @@ function ArrangementForm({
   title: string;
   content: string;
   scheduledTime: string;
+  reminderEnabled: boolean;
+  reminderPreset: ArrangementReminderPreset;
+  reminderRepeat: ArrangementReminderRepeat;
+  reminderCustomTime: string;
   kind: ArrangementKind;
   priority: ArrangementPriority;
   location: string;
@@ -6202,6 +6586,10 @@ function ArrangementForm({
   onTitleChange: (value: string) => void;
   onContentChange: (value: string) => void;
   onScheduledTimeChange: (value: string) => void;
+  onReminderEnabledChange: (value: boolean) => void;
+  onReminderPresetChange: (value: ArrangementReminderPreset) => void;
+  onReminderRepeatChange: (value: ArrangementReminderRepeat) => void;
+  onReminderCustomTimeChange: (value: string) => void;
   onKindChange: (value: ArrangementKind) => void;
   onPriorityChange: (value: ArrangementPriority) => void;
   onLocationChange: (value: string) => void;
@@ -6212,6 +6600,7 @@ function ArrangementForm({
   onSourceTextChange: (value: string) => void;
 }) {
   const [dateValue = "", timeValue = ""] = scheduledTime.split("T");
+  const reminderNeedsCustomTime = reminderPreset === "custom" || !scheduledTime;
   const applyDateAndTime = (nextDate: string, nextTime: string) => {
     if (!nextDate) {
       onScheduledTimeChange("");
@@ -6363,6 +6752,79 @@ function ArrangementForm({
         </div>
       </label>
 
+      <section className="rounded-[12px] bg-surface-subtle px-3 py-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-medium leading-5 text-text">提醒</p>
+            <p className="mt-1 text-xs leading-4 text-text-muted">支持到时、提前和循环提醒</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => onReminderEnabledChange(!reminderEnabled)}
+            className={cn(
+              "relative inline-flex h-7 w-12 items-center rounded-full transition",
+              reminderEnabled ? "bg-primary" : "bg-black/10 dark:bg-white/10"
+            )}
+            aria-pressed={reminderEnabled}
+          >
+            <span
+              className={cn(
+                "inline-block h-5 w-5 rounded-full bg-white shadow transition",
+                reminderEnabled ? "translate-x-6" : "translate-x-1"
+              )}
+            />
+          </button>
+        </div>
+
+        {reminderEnabled && (
+          <div className="mt-3 space-y-3">
+            <div className="grid grid-cols-2 gap-2">
+              <label className="block">
+                <span className="text-xs font-medium leading-4 text-text-muted">提醒方式</span>
+                <select
+                  value={reminderPreset}
+                  onChange={(event) =>
+                    onReminderPresetChange(event.target.value as ArrangementReminderPreset)
+                  }
+                  className="mt-1.5 h-11 w-full rounded-[12px] border border-transparent bg-bg px-3 text-[15px] leading-5 text-text outline-none transition focus:bg-input-bg-focus focus:shadow-[0_0_0_1px_var(--primary-ring),0_0_10px_var(--primary-ring)]"
+                >
+                  <option value="at_time">到时提醒</option>
+                  <option value="10m_before">提前10分钟</option>
+                  <option value="1h_before">提前1小时</option>
+                  <option value="1d_before">提前1天</option>
+                  <option value="custom">自定义提醒</option>
+                </select>
+              </label>
+              <label className="block">
+                <span className="text-xs font-medium leading-4 text-text-muted">重复</span>
+                <select
+                  value={reminderRepeat}
+                  onChange={(event) =>
+                    onReminderRepeatChange(event.target.value as ArrangementReminderRepeat)
+                  }
+                  className="mt-1.5 h-11 w-full rounded-[12px] border border-transparent bg-bg px-3 text-[15px] leading-5 text-text outline-none transition focus:bg-input-bg-focus focus:shadow-[0_0_0_1px_var(--primary-ring),0_0_10px_var(--primary-ring)]"
+                >
+                  <option value="none">单次提醒</option>
+                  <option value="daily">每天重复</option>
+                  <option value="weekly">每周重复</option>
+                </select>
+              </label>
+            </div>
+            {reminderNeedsCustomTime && (
+              <label className="block">
+                <span className="text-xs font-medium leading-4 text-text-muted">提醒时间</span>
+                <input
+                  type="datetime-local"
+                  value={reminderCustomTime}
+                  onChange={(event) => onReminderCustomTimeChange(event.target.value)}
+                  className="mt-1.5 h-11 w-full rounded-[12px] border border-transparent bg-bg px-3 text-[15px] leading-5 text-text outline-none transition focus:bg-input-bg-focus focus:shadow-[0_0_0_1px_var(--primary-ring),0_0_10px_var(--primary-ring)]"
+                />
+              </label>
+            )}
+          </div>
+        )}
+      </section>
+
       <label className="block">
         <span className="text-xs font-medium leading-4 text-text-muted">清单</span>
         <textarea
@@ -6455,11 +6917,13 @@ function ArrangementCard({
   const showKind = shouldShowArrangementKind(arrangement.kind);
   const showPriority = shouldShowArrangementPriority(arrangement.priority);
   const showLocation = arrangement.location.trim().length > 0;
+  const showReminder = arrangement.reminderEnabled && arrangement.reminderNextAt !== null;
   const metadataTags = [
     showKind ? getArrangementKindLabel(arrangement.kind) : null,
     showPriority ? getArrangementPriorityLabel(arrangement.priority) : null,
     showLocation ? arrangement.location : null,
-  ].filter((item): item is string => Boolean(item)).slice(0, 3);
+    showReminder ? `提醒 ${formatArrangementDateTime(arrangement.reminderNextAt).slice(5)}` : null,
+  ].filter((item): item is string => Boolean(item)).slice(0, 4);
   const leftActions =
     arrangement.status === "completed"
       ? [{ key: "restore", label: "恢复", status: "todo" as ArrangementStatus, className: "bg-surface-subtle text-text" }]
@@ -6677,7 +7141,7 @@ function QuarterArrangementCalendar({
   const dayStats = new Map<string, number>();
 
   arrangements.forEach((arrangement) => {
-    const key = toArrangementDateKey(arrangement.scheduledAt);
+    const key = toArrangementDateKey(getArrangementTimelineAt(arrangement));
     if (!key) return;
     dayStats.set(
       key,
@@ -6959,6 +7423,10 @@ function ArrangementDetailView({
   title,
   content,
   scheduledTime,
+  reminderEnabled,
+  reminderPreset,
+  reminderRepeat,
+  reminderCustomTime,
   kind,
   priority,
   location,
@@ -6975,6 +7443,10 @@ function ArrangementDetailView({
   onTitleChange,
   onContentChange,
   onScheduledTimeChange,
+  onReminderEnabledChange,
+  onReminderPresetChange,
+  onReminderRepeatChange,
+  onReminderCustomTimeChange,
   onKindChange,
   onPriorityChange,
   onLocationChange,
@@ -6994,6 +7466,9 @@ function ArrangementDetailView({
   onDismissCompletionSuggestion,
   onRollbackAiCompletion,
   onRollbackAiExecution,
+  onMarkReminderRead,
+  onIgnoreReminder,
+  onSnoozeReminder,
   onDelete,
   onOpenSourceRecord,
   onOpenSourceConversation,
@@ -7004,6 +7479,10 @@ function ArrangementDetailView({
   title: string;
   content: string;
   scheduledTime: string;
+  reminderEnabled: boolean;
+  reminderPreset: ArrangementReminderPreset;
+  reminderRepeat: ArrangementReminderRepeat;
+  reminderCustomTime: string;
   kind: ArrangementKind;
   priority: ArrangementPriority;
   location: string;
@@ -7020,6 +7499,10 @@ function ArrangementDetailView({
   onTitleChange: (value: string) => void;
   onContentChange: (value: string) => void;
   onScheduledTimeChange: (value: string) => void;
+  onReminderEnabledChange: (value: boolean) => void;
+  onReminderPresetChange: (value: ArrangementReminderPreset) => void;
+  onReminderRepeatChange: (value: ArrangementReminderRepeat) => void;
+  onReminderCustomTimeChange: (value: string) => void;
   onKindChange: (value: ArrangementKind) => void;
   onPriorityChange: (value: ArrangementPriority) => void;
   onLocationChange: (value: string) => void;
@@ -7039,6 +7522,9 @@ function ArrangementDetailView({
   onDismissCompletionSuggestion: () => void;
   onRollbackAiCompletion: () => void;
   onRollbackAiExecution: () => void;
+  onMarkReminderRead: () => void;
+  onIgnoreReminder: () => void;
+  onSnoozeReminder: () => void;
   onDelete: () => void;
   onOpenSourceRecord: (record: RecordItem) => void;
   onOpenSourceConversation: (source: RecordSourceConversation) => void;
@@ -7116,6 +7602,10 @@ function ArrangementDetailView({
               title={title}
               content={content}
               scheduledTime={scheduledTime}
+              reminderEnabled={reminderEnabled}
+              reminderPreset={reminderPreset}
+              reminderRepeat={reminderRepeat}
+              reminderCustomTime={reminderCustomTime}
               kind={kind}
               priority={priority}
               location={location}
@@ -7132,6 +7622,10 @@ function ArrangementDetailView({
               onTitleChange={onTitleChange}
               onContentChange={onContentChange}
               onScheduledTimeChange={onScheduledTimeChange}
+              onReminderEnabledChange={onReminderEnabledChange}
+              onReminderPresetChange={onReminderPresetChange}
+              onReminderRepeatChange={onReminderRepeatChange}
+              onReminderCustomTimeChange={onReminderCustomTimeChange}
               onKindChange={onKindChange}
               onPriorityChange={onPriorityChange}
               onLocationChange={onLocationChange}
@@ -7391,6 +7885,28 @@ function ArrangementDetailView({
               )}
               <div className="mt-4 space-y-2 border-t border-border-light pt-3 text-sm leading-5">
                 <ArrangementDetailRow
+                  label="提醒设置"
+                  value={formatArrangementReminderSummary(arrangement)}
+                />
+                {arrangement.reminderEnabled && (
+                  <>
+                    <ArrangementDetailRow
+                      label="下次提醒"
+                      value={formatArrangementDateTime(arrangement.reminderNextAt)}
+                    />
+                    <ArrangementDetailRow
+                      label="提醒状态"
+                      value={getArrangementReminderStateLabel(arrangement.reminderState)}
+                    />
+                    {arrangement.reminderLastTriggeredAt && (
+                      <ArrangementDetailRow
+                        label="最近提醒"
+                        value={formatArrangementDateTime(arrangement.reminderLastTriggeredAt)}
+                      />
+                    )}
+                  </>
+                )}
+                <ArrangementDetailRow
                   label="安排时间"
                   value={formatArrangementDateTime(arrangement.scheduledAt)}
                 />
@@ -7503,6 +8019,37 @@ function ArrangementDetailView({
                   />
                 )}
               </div>
+              {arrangement.reminderEnabled && arrangement.reminderState === "triggered" && (
+                <div className="mt-4 rounded-[12px] border border-violet-200 bg-violet-50 px-3 py-3 dark:border-violet-900/50 dark:bg-violet-950/20">
+                  <p className="text-sm font-semibold leading-5 text-text">提醒待处理</p>
+                  <p className="mt-1 text-sm leading-5 text-text-muted">
+                    可以标记已读、忽略本次，或稍后再提醒。
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      className="rounded-[10px] bg-primary px-3 py-2 text-sm font-semibold text-on-primary transition active:scale-[0.98]"
+                      onClick={onMarkReminderRead}
+                    >
+                      标记已读
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-[10px] bg-white px-3 py-2 text-sm font-medium text-text transition active:scale-[0.98] dark:bg-surface"
+                      onClick={onSnoozeReminder}
+                    >
+                      10分钟后提醒
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-[10px] bg-white px-3 py-2 text-sm font-medium text-text-secondary transition active:scale-[0.98] dark:bg-surface"
+                      onClick={onIgnoreReminder}
+                    >
+                      忽略本次
+                    </button>
+                  </div>
+                </div>
+              )}
             </>
           )}
         </article>
