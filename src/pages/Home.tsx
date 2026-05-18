@@ -142,6 +142,40 @@ type ArrangementCompletionSuggestion = {
   sourceRecord: RecordReference | null;
 };
 
+type ArrangementExecutionRisk = "low" | "medium" | "high";
+
+type ArrangementExecutionAction =
+  | "refine_details"
+  | "create_checklist"
+  | "reschedule"
+  | "draft_message";
+
+type ArrangementExecutionSuggestion = {
+  action: ArrangementExecutionAction;
+  title: string;
+  summary: string;
+  detail: string;
+  confidence: ArrangementAiConfidence;
+  riskLevel: ArrangementExecutionRisk;
+  suggestedChecklist: string[];
+  suggestedContent: string;
+  suggestedCompletionCriteria: string;
+  suggestedScheduledAt: number | null;
+  suggestedScheduledAtText: string;
+  suggestedMessage: string;
+  suggestedAt: number;
+};
+
+type ArrangementExecutionRecord = ArrangementExecutionSuggestion & {
+  appliedAt: number;
+  rolledBackAt: number | null;
+  previousContent: string;
+  previousChecklist: ArrangementChecklistItem[];
+  previousCompletionCriteria: string;
+  previousScheduledAt: number | null;
+  previousAiSummary: string;
+};
+
 type ArrangementAiRecognitionResult = {
   action: ArrangementAiAction;
   targetUid: string;
@@ -164,6 +198,25 @@ type ArrangementAiRecognitionResult = {
   completionExplanation: string;
   executionLevel: ArrangementExecutionLevel;
   executionReason: string;
+  rawResponse: string;
+};
+
+type ArrangementExecutionSuggestionResult = {
+  shouldSuggest: boolean;
+  executionLevel: ArrangementExecutionLevel;
+  executionReason: string;
+  action: ArrangementExecutionAction;
+  riskLevel: ArrangementExecutionRisk;
+  confidence: ArrangementAiConfidence;
+  title: string;
+  summary: string;
+  detail: string;
+  suggestedChecklist: string[];
+  suggestedContent: string;
+  suggestedCompletionCriteria: string;
+  suggestedScheduledAt: string;
+  suggestedScheduledAtText: string;
+  suggestedMessage: string;
   rawResponse: string;
 };
 
@@ -230,6 +283,8 @@ type ArrangementItem = {
   aiExecutionReason: string;
   pendingCompletionSuggestion: ArrangementCompletionSuggestion | null;
   lastCompletionSuggestion: ArrangementCompletionSuggestion | null;
+  pendingExecutionSuggestion: ArrangementExecutionSuggestion | null;
+  lastExecutionRecord: ArrangementExecutionRecord | null;
   createAt: number;
   updateAt: number;
 };
@@ -564,6 +619,10 @@ function normalizeStoredArrangement(value: unknown): ArrangementItem | null {
     lastCompletionSuggestion: normalizeArrangementCompletionSuggestion(
       arrangement.lastCompletionSuggestion
     ),
+    pendingExecutionSuggestion: normalizeArrangementExecutionSuggestion(
+      arrangement.pendingExecutionSuggestion
+    ),
+    lastExecutionRecord: normalizeArrangementExecutionRecord(arrangement.lastExecutionRecord),
     createAt: arrangement.createAt,
     updateAt: arrangement.updateAt,
   };
@@ -652,6 +711,29 @@ function getArrangementAiActionLabel(action: ArrangementAiAction | null) {
   if (action === "update") return "更新原安排";
   if (action === "create") return "新建草稿";
   return "";
+}
+
+function getArrangementExecutionActionLabel(action: ArrangementExecutionAction) {
+  if (action === "create_checklist") return "拆出清单";
+  if (action === "reschedule") return "调整时间";
+  if (action === "draft_message") return "生成草稿";
+  return "完善内容";
+}
+
+function getArrangementExecutionRiskLabel(risk: ArrangementExecutionRisk) {
+  if (risk === "high") return "高风险";
+  if (risk === "low") return "低风险";
+  return "中风险";
+}
+
+function getArrangementExecutionRiskPillClass(risk: ArrangementExecutionRisk) {
+  if (risk === "high") {
+    return "bg-rose-100 text-rose-700 dark:bg-rose-950/70 dark:text-rose-300";
+  }
+  if (risk === "low") {
+    return "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/70 dark:text-emerald-300";
+  }
+  return "bg-amber-100 text-amber-700 dark:bg-amber-950/70 dark:text-amber-300";
 }
 
 function getConversationArrangementSourceLabel(
@@ -746,6 +828,23 @@ function normalizeArrangementExecutionLevel(value: unknown): ArrangementExecutio
   return "manual_only";
 }
 
+function normalizeArrangementExecutionRisk(value: unknown): ArrangementExecutionRisk {
+  if (value === "low" || value === "high") return value;
+  return "medium";
+}
+
+function normalizeArrangementExecutionAction(value: unknown): ArrangementExecutionAction {
+  if (
+    value === "refine_details" ||
+    value === "create_checklist" ||
+    value === "reschedule" ||
+    value === "draft_message"
+  ) {
+    return value;
+  }
+  return "refine_details";
+}
+
 function normalizeArrangementCompletionSuggestion(
   value: unknown
 ): ArrangementCompletionSuggestion | null {
@@ -765,6 +864,74 @@ function normalizeArrangementCompletionSuggestion(
         : Date.now(),
     sourceConversation: suggestion.sourceConversation ?? null,
     sourceRecord: suggestion.sourceRecord ?? null,
+  };
+}
+
+function normalizeArrangementExecutionSuggestion(
+  value: unknown
+): ArrangementExecutionSuggestion | null {
+  if (!value || typeof value !== "object") return null;
+  const suggestion = value as Partial<ArrangementExecutionSuggestion>;
+  return {
+    action: normalizeArrangementExecutionAction(suggestion.action),
+    title: typeof suggestion.title === "string" ? suggestion.title.trim() : "",
+    summary: typeof suggestion.summary === "string" ? suggestion.summary.trim() : "",
+    detail: typeof suggestion.detail === "string" ? suggestion.detail.trim() : "",
+    confidence: normalizeArrangementAiConfidence(suggestion.confidence),
+    riskLevel: normalizeArrangementExecutionRisk(suggestion.riskLevel),
+    suggestedChecklist: normalizeArrangementTextList(suggestion.suggestedChecklist),
+    suggestedContent:
+      typeof suggestion.suggestedContent === "string" ? suggestion.suggestedContent.trim() : "",
+    suggestedCompletionCriteria:
+      typeof suggestion.suggestedCompletionCriteria === "string"
+        ? suggestion.suggestedCompletionCriteria.trim()
+        : "",
+    suggestedScheduledAt:
+      typeof suggestion.suggestedScheduledAt === "number" &&
+      Number.isFinite(suggestion.suggestedScheduledAt)
+        ? suggestion.suggestedScheduledAt
+        : null,
+    suggestedScheduledAtText:
+      typeof suggestion.suggestedScheduledAtText === "string"
+        ? suggestion.suggestedScheduledAtText.trim()
+        : "",
+    suggestedMessage:
+      typeof suggestion.suggestedMessage === "string" ? suggestion.suggestedMessage.trim() : "",
+    suggestedAt:
+      typeof suggestion.suggestedAt === "number" && Number.isFinite(suggestion.suggestedAt)
+        ? suggestion.suggestedAt
+        : Date.now(),
+  };
+}
+
+function normalizeArrangementExecutionRecord(value: unknown): ArrangementExecutionRecord | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Partial<ArrangementExecutionRecord>;
+  const suggestion = normalizeArrangementExecutionSuggestion(record);
+  if (!suggestion) return null;
+  return {
+    ...suggestion,
+    appliedAt:
+      typeof record.appliedAt === "number" && Number.isFinite(record.appliedAt)
+        ? record.appliedAt
+        : Date.now(),
+    rolledBackAt:
+      typeof record.rolledBackAt === "number" && Number.isFinite(record.rolledBackAt)
+        ? record.rolledBackAt
+        : null,
+    previousContent:
+      typeof record.previousContent === "string" ? record.previousContent.trim() : "",
+    previousChecklist: normalizeArrangementChecklist(record.previousChecklist),
+    previousCompletionCriteria:
+      typeof record.previousCompletionCriteria === "string"
+        ? record.previousCompletionCriteria.trim()
+        : "",
+    previousScheduledAt:
+      typeof record.previousScheduledAt === "number" && Number.isFinite(record.previousScheduledAt)
+        ? record.previousScheduledAt
+        : null,
+    previousAiSummary:
+      typeof record.previousAiSummary === "string" ? record.previousAiSummary.trim() : "",
   };
 }
 
@@ -835,6 +1002,88 @@ function normalizeArrangementAiRecognitionResult(
       typeof result.executionReason === "string" ? result.executionReason.trim() : "",
     rawResponse,
   };
+}
+
+function normalizeArrangementExecutionSuggestionResult(
+  value: unknown,
+  rawResponse: string
+): ArrangementExecutionSuggestionResult {
+  const result = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  return {
+    shouldSuggest: result.shouldSuggest !== false,
+    executionLevel: normalizeArrangementExecutionLevel(result.executionLevel),
+    executionReason:
+      typeof result.executionReason === "string" ? result.executionReason.trim() : "",
+    action: normalizeArrangementExecutionAction(result.action),
+    riskLevel: normalizeArrangementExecutionRisk(result.riskLevel),
+    confidence: normalizeArrangementAiConfidence(result.confidence),
+    title: typeof result.title === "string" ? result.title.trim() : "",
+    summary: typeof result.summary === "string" ? result.summary.trim() : "",
+    detail: typeof result.detail === "string" ? result.detail.trim() : "",
+    suggestedChecklist: normalizeArrangementTextList(result.suggestedChecklist),
+    suggestedContent:
+      typeof result.suggestedContent === "string" ? result.suggestedContent.trim() : "",
+    suggestedCompletionCriteria:
+      typeof result.suggestedCompletionCriteria === "string"
+        ? result.suggestedCompletionCriteria.trim()
+        : "",
+    suggestedScheduledAt:
+      typeof result.suggestedScheduledAt === "string" ? result.suggestedScheduledAt.trim() : "",
+    suggestedScheduledAtText:
+      typeof result.suggestedScheduledAtText === "string"
+        ? result.suggestedScheduledAtText.trim()
+        : "",
+    suggestedMessage:
+      typeof result.suggestedMessage === "string" ? result.suggestedMessage.trim() : "",
+    rawResponse,
+  };
+}
+
+function containsCjkCharacters(value: string) {
+  return /[\u3400-\u9FFF]/.test(value);
+}
+
+function formatArrangementForExecutionAi(arrangement: ArrangementItem) {
+  return [
+    `uid=${arrangement.uid}`,
+    `title=${arrangement.title}`,
+    `status=${arrangement.status}`,
+    `kind=${arrangement.kind}`,
+    `priority=${arrangement.priority}`,
+    `scheduledAt=${formatArrangementDateTime(arrangement.scheduledAt)}`,
+    arrangement.location ? `location=${arrangement.location}` : "",
+    arrangement.participants.length > 0
+      ? `participants=${arrangement.participants.join("/")}`
+      : "",
+    arrangement.tags.length > 0 ? `tags=${arrangement.tags.join("/")}` : "",
+    arrangement.checklist.length > 0
+      ? `checklist=${arrangement.checklist.map((item) => item.text).join(" / ")}`
+      : "",
+    arrangement.completionCriteria
+      ? `completionCriteria=${arrangement.completionCriteria}`
+      : "",
+    arrangement.content ? `content=${arrangement.content}` : "",
+    arrangement.aiExecutionReason ? `currentExecutionReason=${arrangement.aiExecutionReason}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function formatArrangementSourcesForExecutionAi(arrangement: ArrangementItem) {
+  return arrangement.sources
+    .map((source, index) =>
+      [
+        `${index + 1}. type=${source.type}`,
+        `label=${source.label || "unknown"}`,
+        source.text ? `text=${source.text}` : "",
+        source.sourceConversation
+          ? `conversation=${source.sourceConversation.label || source.sourceConversation.conversationId || "unknown"}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" | ")
+    )
+    .join("\n");
 }
 
 function extractArrangementTextCues(arrangement: ArrangementItem) {
@@ -1237,6 +1486,23 @@ function parseArrangementChecklist(value: string, now: number): ArrangementCheck
     }));
 }
 
+function mergeArrangementChecklist(
+  currentChecklist: ArrangementChecklistItem[],
+  suggestedItems: string[],
+  now: number
+) {
+  const seen = new Set(currentChecklist.map((item) => item.text.trim()));
+  const appended = suggestedItems
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0 && !seen.has(item))
+    .map((text, index) => ({
+      uid: `exec-checklist-${now}-${index}`,
+      text,
+      completed: false,
+    }));
+  return appended.length > 0 ? [...currentChecklist, ...appended] : currentChecklist;
+}
+
 function getInitialArrangements() {
   if (typeof window === "undefined") {
     return [];
@@ -1265,6 +1531,84 @@ function persistArrangements(arrangements: ArrangementItem[]) {
     window.dispatchEvent(new CustomEvent(arrangementsStorageEvent));
   } catch {
     // Keep the visible in-memory arrangements if storage is unavailable.
+  }
+}
+
+async function suggestArrangementExecution(
+  config: ArrangementAiConfig,
+  arrangement: ArrangementItem,
+  arrangements: ArrangementItem[]
+): Promise<ArrangementExecutionSuggestionResult> {
+  const normalizedConfig = normalizeArrangementAiConfig(config);
+  if (!hasOnlyPrintableAscii(normalizedConfig.apiKey)) {
+    throw new Error("API Key 包含非 ASCII 字符。请重新粘贴，避免中文空格、换行或零宽字符。");
+  }
+
+  const response = await fetch(resolveArrangementAiEndpoint(normalizedConfig.baseUrl), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${normalizedConfig.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: normalizedConfig.model,
+      temperature: 0.2,
+      messages: [
+        {
+          role: "system",
+          content: [
+            "You evaluate whether one arrangement has a low-risk internal AI execution step.",
+            "Return JSON only, without markdown fences.",
+            "All user-facing text fields must be written in Simplified Chinese, including executionReason, title, summary, detail, suggestedScheduledAtText, and suggestedMessage.",
+            "Do not propose external real-world side effects such as sending messages, placing orders, making payments, or contacting third-party services.",
+            "Only suggest low-risk internal actions within the arrangement module: refine_details, create_checklist, reschedule, draft_message.",
+            "Use draft_message only to prepare a message draft; never imply it has been sent.",
+            "If there is no worthwhile internal AI action right now, set shouldSuggest=false and explain why.",
+            "executionLevel must be one of manual_only, ai_assist, ai_auto.",
+            "riskLevel must be one of low, medium, high.",
+            "For high-risk actions, still return the suggestion but make clear it requires manual review.",
+            "Use this schema:",
+            '{"shouldSuggest":true,"executionLevel":"manual_only|ai_assist|ai_auto","executionReason":"string","action":"refine_details|create_checklist|reschedule|draft_message","riskLevel":"low|medium|high","confidence":"low|medium|high","title":"string","summary":"string","detail":"string","suggestedChecklist":["string"],"suggestedContent":"string","suggestedCompletionCriteria":"string","suggestedScheduledAt":"YYYY-MM-DDTHH:mm","suggestedScheduledAtText":"string","suggestedMessage":"string"}',
+          ].join(" "),
+        },
+        {
+          role: "user",
+          content: [
+            "Target arrangement:",
+            formatArrangementForExecutionAi(arrangement),
+            "",
+            "Arrangement sources:",
+            formatArrangementSourcesForExecutionAi(arrangement) || "No source context.",
+            "",
+            "Other unfinished arrangements for context:",
+            formatArrangementAiContext(arrangement.title + "\n" + arrangement.content, arrangements),
+          ].join("\n"),
+        },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(errorText || `HTTP ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+    error?: { message?: string };
+  };
+  const rawContent = payload.choices?.[0]?.message?.content?.trim() ?? "";
+  if (!rawContent) {
+    throw new Error(payload.error?.message || "模型没有返回可解析内容");
+  }
+
+  try {
+    return normalizeArrangementExecutionSuggestionResult(
+      JSON.parse(extractJsonBlock(rawContent)),
+      rawContent
+    );
+  } catch {
+    throw new Error("模型返回内容不是有效 JSON，请调整模型或 Base URL 后重试");
   }
 }
 
@@ -4475,6 +4819,8 @@ function ArrangementsPreview({
   const [pendingExecutionLevel, setPendingExecutionLevel] =
     React.useState<ArrangementExecutionLevel>("manual_only");
   const [pendingExecutionReason, setPendingExecutionReason] = React.useState("");
+  const [executingSuggestionArrangementId, setExecutingSuggestionArrangementId] =
+    React.useState<string | null>(null);
   const [showFilters, setShowFilters] = React.useState(false);
   const [filters, setFilters] = React.useState<ArrangementFilterState>({
     status: "all",
@@ -4577,6 +4923,9 @@ function ArrangementsPreview({
   const completedCount = filteredArrangements.filter((item) => item.status === "completed").length;
   const pendingCompletionArrangements = arrangements.filter(
     (item) => item.pendingCompletionSuggestion
+  );
+  const pendingExecutionArrangements = arrangements.filter(
+    (item) => item.pendingExecutionSuggestion
   );
 
   React.useEffect(() => {
@@ -5031,6 +5380,8 @@ function ArrangementsPreview({
                   : primaryTarget.aiExecutionReason,
                 pendingCompletionSuggestion: primaryTarget.pendingCompletionSuggestion,
                 lastCompletionSuggestion: primaryTarget.lastCompletionSuggestion,
+                pendingExecutionSuggestion: primaryTarget.pendingExecutionSuggestion,
+                lastExecutionRecord: primaryTarget.lastExecutionRecord,
                 updateAt: now,
               }
             : arrangement
@@ -5072,6 +5423,8 @@ function ArrangementsPreview({
         aiExecutionReason: isAiDerivedSource ? pendingExecutionReason : "",
         pendingCompletionSuggestion: null,
         lastCompletionSuggestion: null,
+        pendingExecutionSuggestion: null,
+        lastExecutionRecord: null,
         createAt: now,
         updateAt: now,
       };
@@ -5091,6 +5444,8 @@ function ArrangementsPreview({
       completedAt: status === "completed" ? now : null,
       pausedAt: status === "paused" ? now : null,
       pendingCompletionSuggestion: status === "completed" ? null : arrangement.pendingCompletionSuggestion,
+      pendingExecutionSuggestion:
+        status === "completed" ? null : arrangement.pendingExecutionSuggestion,
       updateAt: now,
     }));
   };
@@ -5135,6 +5490,165 @@ function ArrangementsPreview({
       updateAt: now,
     }));
     setSaveHint("已撤回 AI 完成结果。");
+  };
+
+  const generateExecutionSuggestion = async (uid: string) => {
+    const targetArrangement = arrangements.find((arrangement) => arrangement.uid === uid);
+    if (!targetArrangement) return;
+    if (!isArrangementAiConfigReady(aiConfig)) {
+      setSaveHint("请先在“我的”里完成 AI 模型配置。");
+      return;
+    }
+
+    setExecutingSuggestionArrangementId(uid);
+    setSaveHint("");
+    try {
+      const result = await suggestArrangementExecution(
+        aiConfig,
+        targetArrangement,
+        arrangements
+      );
+      const now = Date.now();
+      const fallbackActionLabel = getArrangementExecutionActionLabel(result.action);
+      const normalizedExecutionReason = containsCjkCharacters(result.executionReason)
+        ? result.executionReason
+        : `AI 判断这条安排当前更适合先做“${fallbackActionLabel}”这一步内部处理。`;
+      const normalizedTitle = containsCjkCharacters(result.title)
+        ? result.title
+        : `AI建议${fallbackActionLabel}`;
+      const normalizedSummary = containsCjkCharacters(result.summary)
+        ? result.summary
+        : result.action === "draft_message"
+          ? "AI 已生成一份可直接复核的执行草稿，采纳后可进入后续执行流程。"
+          : result.action === "create_checklist"
+            ? "AI 已整理出更清晰的执行清单，采纳后会直接补入当前安排。"
+            : result.action === "reschedule"
+              ? "AI 判断当前安排需要先明确或调整时间，采纳后会写回建议时间。"
+              : "AI 已整理出一版更适合执行的安排内容，采纳后会直接更新当前安排。";
+      const normalizedDetail = containsCjkCharacters(result.detail)
+        ? result.detail
+        : normalizedSummary;
+      const normalizedScheduledText = containsCjkCharacters(result.suggestedScheduledAtText)
+        ? result.suggestedScheduledAtText
+        : "";
+      const normalizedSuggestedMessage =
+        result.suggestedMessage.trim() && containsCjkCharacters(result.suggestedMessage)
+          ? result.suggestedMessage.trim()
+          : result.action === "draft_message"
+            ? `请根据这条安排准备一段可发送的消息，围绕“${targetArrangement.title}”推进执行。`
+            : "";
+      const suggestedScheduledAt =
+        parseArrangementScheduledTime(result.suggestedScheduledAt) ??
+        inferScheduledAtFromNaturalLanguage(normalizedScheduledText);
+
+      updateArrangement(uid, (arrangement) => ({
+        ...arrangement,
+        aiExecutionLevel: result.executionLevel,
+        aiExecutionReason: normalizedExecutionReason || arrangement.aiExecutionReason,
+        pendingExecutionSuggestion: result.shouldSuggest
+          ? {
+              action: result.action,
+              title: normalizedTitle,
+              summary: normalizedSummary,
+              detail: normalizedDetail,
+              confidence: result.confidence,
+              riskLevel: result.riskLevel,
+              suggestedChecklist: result.suggestedChecklist,
+              suggestedContent: result.suggestedContent,
+              suggestedCompletionCriteria: result.suggestedCompletionCriteria,
+              suggestedScheduledAt,
+              suggestedScheduledAtText: normalizedScheduledText,
+              suggestedMessage: normalizedSuggestedMessage,
+              suggestedAt: now,
+            }
+          : null,
+        aiProcessedAt: now,
+        updateAt: now,
+      }));
+
+      setSaveHint(
+        result.shouldSuggest ? "AI 已生成执行建议。" : "AI 当前认为这条安排暂不适合代执行。"
+      );
+    } catch (error) {
+      setSaveHint(error instanceof Error ? error.message : "AI 执行建议生成失败，请稍后重试。");
+    } finally {
+      setExecutingSuggestionArrangementId(null);
+    }
+  };
+
+  const acceptExecutionSuggestion = (uid: string) => {
+    const now = Date.now();
+    updateArrangement(uid, (arrangement) => {
+      const suggestion = arrangement.pendingExecutionSuggestion;
+      if (!suggestion) return arrangement;
+
+      const nextChecklist = mergeArrangementChecklist(
+        arrangement.checklist,
+        suggestion.suggestedChecklist,
+        now
+      );
+      const nextContent = suggestion.suggestedContent || arrangement.content;
+      const nextCompletionCriteria =
+        suggestion.suggestedCompletionCriteria || arrangement.completionCriteria;
+      const nextScheduledAt =
+        suggestion.action === "reschedule" && suggestion.suggestedScheduledAt !== null
+          ? suggestion.suggestedScheduledAt
+          : arrangement.scheduledAt;
+
+      return {
+        ...arrangement,
+        content: nextContent,
+        checklist: nextChecklist,
+        completionCriteria: nextCompletionCriteria,
+        scheduledAt: nextScheduledAt,
+        aiSummary: suggestion.suggestedMessage || suggestion.summary || arrangement.aiSummary,
+        aiProcessedAt: now,
+        pendingExecutionSuggestion: null,
+        lastExecutionRecord: {
+          ...suggestion,
+          appliedAt: now,
+          rolledBackAt: null,
+          previousContent: arrangement.content,
+          previousChecklist: arrangement.checklist,
+          previousCompletionCriteria: arrangement.completionCriteria,
+          previousScheduledAt: arrangement.scheduledAt,
+          previousAiSummary: arrangement.aiSummary,
+        },
+        updateAt: now,
+      };
+    });
+    setSaveHint("已采纳 AI 执行建议。");
+  };
+
+  const dismissExecutionSuggestion = (uid: string) => {
+    updateArrangement(uid, (arrangement) => ({
+      ...arrangement,
+      pendingExecutionSuggestion: null,
+      updateAt: Date.now(),
+    }));
+    setSaveHint("已忽略这条 AI 执行建议。");
+  };
+
+  const rollbackAiExecution = (uid: string) => {
+    const now = Date.now();
+    updateArrangement(uid, (arrangement) => {
+      const record = arrangement.lastExecutionRecord;
+      if (!record || record.rolledBackAt) return arrangement;
+      return {
+        ...arrangement,
+        content: record.previousContent,
+        checklist: record.previousChecklist,
+        completionCriteria: record.previousCompletionCriteria,
+        scheduledAt: record.previousScheduledAt,
+        aiSummary: record.previousAiSummary,
+        lastExecutionRecord: {
+          ...record,
+          rolledBackAt: now,
+        },
+        updateAt: now,
+      };
+    });
+    setSaveHint("已撤回 AI 代执行结果。");
   };
 
   const deleteArrangement = (uid: string) => {
@@ -5223,9 +5737,16 @@ function ArrangementsPreview({
         onComplete={() => changeStatus(activeArrangement.uid, "completed")}
         onPause={() => changeStatus(activeArrangement.uid, "paused")}
         onRestore={() => changeStatus(activeArrangement.uid, "todo")}
+        onGenerateExecutionSuggestion={() => generateExecutionSuggestion(activeArrangement.uid)}
+        isGeneratingExecutionSuggestion={
+          executingSuggestionArrangementId === activeArrangement.uid
+        }
+        onAcceptExecutionSuggestion={() => acceptExecutionSuggestion(activeArrangement.uid)}
+        onDismissExecutionSuggestion={() => dismissExecutionSuggestion(activeArrangement.uid)}
         onAcceptCompletionSuggestion={() => acceptCompletionSuggestion(activeArrangement.uid)}
         onDismissCompletionSuggestion={() => dismissCompletionSuggestion(activeArrangement.uid)}
         onRollbackAiCompletion={() => rollbackAiCompletion(activeArrangement.uid)}
+        onRollbackAiExecution={() => rollbackAiExecution(activeArrangement.uid)}
         onDelete={() => deleteArrangement(activeArrangement.uid)}
         onOpenSourceRecord={onOpenSourceRecord}
         onOpenSourceConversation={onOpenSourceConversation}
@@ -5507,6 +6028,26 @@ function ArrangementsPreview({
           <p className="mb-3 rounded-[10px] bg-primary-soft px-3 py-2 text-xs leading-4 text-primary">
             {saveHint}
           </p>
+        )}
+
+        {!showForm && pendingExecutionArrangements.length > 0 && (
+          <section className="mb-3 rounded-[12px] border border-sky-200 bg-sky-50 px-3 py-3 shadow-[var(--mine-card-shadow)] dark:border-sky-900/50 dark:bg-sky-950/20">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold leading-5 text-text">AI 执行建议</p>
+                <p className="mt-1 text-sm leading-5 text-text-muted">
+                  当前有 {pendingExecutionArrangements.length} 条安排可以先交给 AI 做内部整理或执行准备。
+                </p>
+              </div>
+              <button
+                type="button"
+                className="shrink-0 rounded-full bg-white/80 px-3 py-1.5 text-sm font-medium leading-4 text-sky-700 transition active:scale-[0.98] dark:bg-sky-950/40 dark:text-sky-200"
+                onClick={() => setActiveArrangementId(pendingExecutionArrangements[0]!.uid)}
+              >
+                查看
+              </button>
+            </div>
+          </section>
         )}
 
         {!showForm && pendingCompletionArrangements.length > 0 && (
@@ -6445,9 +6986,14 @@ function ArrangementDetailView({
   onComplete,
   onPause,
   onRestore,
+  onGenerateExecutionSuggestion,
+  isGeneratingExecutionSuggestion,
+  onAcceptExecutionSuggestion,
+  onDismissExecutionSuggestion,
   onAcceptCompletionSuggestion,
   onDismissCompletionSuggestion,
   onRollbackAiCompletion,
+  onRollbackAiExecution,
   onDelete,
   onOpenSourceRecord,
   onOpenSourceConversation,
@@ -6485,9 +7031,14 @@ function ArrangementDetailView({
   onComplete: () => void;
   onPause: () => void;
   onRestore: () => void;
+  onGenerateExecutionSuggestion: () => void;
+  isGeneratingExecutionSuggestion: boolean;
+  onAcceptExecutionSuggestion: () => void;
+  onDismissExecutionSuggestion: () => void;
   onAcceptCompletionSuggestion: () => void;
   onDismissCompletionSuggestion: () => void;
   onRollbackAiCompletion: () => void;
+  onRollbackAiExecution: () => void;
   onDelete: () => void;
   onOpenSourceRecord: (record: RecordItem) => void;
   onOpenSourceConversation: (source: RecordSourceConversation) => void;
@@ -6499,6 +7050,8 @@ function ArrangementDetailView({
       : null);
   const completionSuggestion = arrangement.pendingCompletionSuggestion;
   const lastCompletionSuggestion = arrangement.lastCompletionSuggestion;
+  const executionSuggestion = arrangement.pendingExecutionSuggestion;
+  const lastExecutionRecord = arrangement.lastExecutionRecord;
 
   return (
     <div className="flex h-full flex-col bg-bg">
@@ -6638,6 +7191,142 @@ function ArrangementDetailView({
                   </p>
                 )}
               </section>
+              {arrangement.status !== "completed" && (
+                <div className="mt-3">
+                  <button
+                    type="button"
+                    className="h-10 rounded-[10px] bg-primary-soft px-3 text-sm font-medium text-primary transition active:scale-[0.97]"
+                    onClick={onGenerateExecutionSuggestion}
+                    disabled={isGeneratingExecutionSuggestion}
+                  >
+                    {isGeneratingExecutionSuggestion ? "生成中..." : "生成 AI 执行建议"}
+                  </button>
+                </div>
+              )}
+              {executionSuggestion && (
+                <section className="mt-4 rounded-[12px] border border-sky-200 bg-sky-50 px-3 py-3 dark:border-sky-900/40 dark:bg-sky-950/20">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-sm font-semibold leading-5 text-text">AI 执行建议</p>
+                    <span
+                      className={cn(
+                        "rounded-full px-2.5 py-1 text-[11px] font-medium leading-4",
+                        getArrangementExecutionRiskPillClass(executionSuggestion.riskLevel)
+                      )}
+                    >
+                      {getArrangementExecutionRiskLabel(executionSuggestion.riskLevel)}
+                    </span>
+                    <span className="rounded-full bg-white/80 px-2.5 py-1 text-[11px] font-medium leading-4 text-sky-700 dark:bg-sky-950/40 dark:text-sky-200">
+                      {getArrangementExecutionActionLabel(executionSuggestion.action)}
+                    </span>
+                  </div>
+                  <p className="mt-2 text-sm font-medium leading-5 text-text">
+                    {executionSuggestion.title || "AI 已准备一条执行建议"}
+                  </p>
+                  <p className="mt-2 text-sm leading-6 text-text">{executionSuggestion.summary}</p>
+                  {executionSuggestion.detail && (
+                    <p className="mt-2 text-sm leading-6 text-text-muted">
+                      {executionSuggestion.detail}
+                    </p>
+                  )}
+                  {executionSuggestion.suggestedChecklist.length > 0 && (
+                    <div className="mt-3 rounded-[10px] bg-white/70 px-3 py-2 dark:bg-black/10">
+                      <p className="text-xs font-medium leading-4 text-text-tertiary">建议清单</p>
+                      <div className="mt-2 space-y-1.5">
+                        {executionSuggestion.suggestedChecklist.map((item) => (
+                          <p key={item} className="text-sm leading-5 text-text">
+                            • {item}
+                          </p>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {executionSuggestion.suggestedMessage && (
+                    <div className="mt-3 rounded-[10px] bg-white/70 px-3 py-2 dark:bg-black/10">
+                      <p className="text-xs font-medium leading-4 text-text-tertiary">执行草稿</p>
+                      <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-text">
+                        {executionSuggestion.suggestedMessage}
+                      </p>
+                    </div>
+                  )}
+                  {executionSuggestion.suggestedScheduledAt !== null && (
+                    <p className="mt-2 text-sm leading-6 text-text-muted">
+                      建议时间：{formatArrangementDateTime(executionSuggestion.suggestedScheduledAt)}
+                    </p>
+                  )}
+                  <p className="mt-2 text-xs leading-5 text-text-tertiary">
+                    置信度：
+                    {executionSuggestion.confidence === "high"
+                      ? "高"
+                      : executionSuggestion.confidence === "medium"
+                        ? "中"
+                        : "低"}
+                    {" · "}
+                    {formatArrangementDateTime(executionSuggestion.suggestedAt)}
+                  </p>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      className="h-10 rounded-[10px] bg-primary text-sm font-semibold text-on-primary transition active:scale-[0.97]"
+                      onClick={onAcceptExecutionSuggestion}
+                    >
+                      采纳建议
+                    </button>
+                    <button
+                      type="button"
+                      className="h-10 rounded-[10px] bg-surface text-sm font-medium text-text transition active:scale-[0.97]"
+                      onClick={onDismissExecutionSuggestion}
+                    >
+                      暂不采用
+                    </button>
+                  </div>
+                </section>
+              )}
+              {!executionSuggestion && lastExecutionRecord && (
+                <section className="mt-4 rounded-[12px] border border-border-light bg-surface px-3 py-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-sm font-semibold leading-5 text-text">AI 执行记录</p>
+                    <span
+                      className={cn(
+                        "rounded-full px-2.5 py-1 text-[11px] font-medium leading-4",
+                        getArrangementExecutionRiskPillClass(lastExecutionRecord.riskLevel)
+                      )}
+                    >
+                      {getArrangementExecutionRiskLabel(lastExecutionRecord.riskLevel)}
+                    </span>
+                    <span className="rounded-full bg-primary-soft px-2.5 py-1 text-[11px] font-medium leading-4 text-primary">
+                      {getArrangementExecutionActionLabel(lastExecutionRecord.action)}
+                    </span>
+                    {lastExecutionRecord.rolledBackAt && (
+                      <span className="rounded-full bg-surface-subtle px-2.5 py-1 text-[11px] font-medium leading-4 text-text-tertiary">
+                        已撤回
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-2 text-sm leading-6 text-text">
+                    {lastExecutionRecord.summary || "AI 已按建议完成一次内部执行处理。"}
+                  </p>
+                  {lastExecutionRecord.suggestedMessage && (
+                    <div className="mt-3 rounded-[10px] bg-surface-subtle px-3 py-2">
+                      <p className="text-xs font-medium leading-4 text-text-tertiary">执行草稿</p>
+                      <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-text">
+                        {lastExecutionRecord.suggestedMessage}
+                      </p>
+                    </div>
+                  )}
+                  <p className="mt-2 text-xs leading-5 text-text-tertiary">
+                    执行时间：{formatArrangementDateTime(lastExecutionRecord.appliedAt)}
+                  </p>
+                  {!lastExecutionRecord.rolledBackAt && (
+                    <button
+                      type="button"
+                      className="mt-3 h-10 rounded-[10px] bg-surface-subtle px-3 text-sm font-medium text-text transition active:scale-[0.97]"
+                      onClick={onRollbackAiExecution}
+                    >
+                      撤回 AI 代执行
+                    </button>
+                  )}
+                </section>
+              )}
               {completionSuggestion && (
                 <section className="mt-4 rounded-[12px] border border-amber-200 bg-amber-50 px-3 py-3 dark:border-amber-900/40 dark:bg-amber-950/20">
                   <p className="text-sm font-semibold leading-5 text-text">AI 完成建议</p>
