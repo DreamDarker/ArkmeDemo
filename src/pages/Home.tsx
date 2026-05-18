@@ -5957,7 +5957,10 @@ function ArrangementsPreview({
         </div>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-24 pt-2">
+      <div
+        className="min-h-0 flex-1 overflow-y-auto px-3 pb-24 pt-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        style={{ msOverflowStyle: "none" }}
+      >
         {!showForm && (
           <QuarterArrangementCalendar
             arrangements={arrangements}
@@ -5968,12 +5971,10 @@ function ArrangementsPreview({
                 selectedDateKeys: [],
               }))
             }
-            onSelectDate={(dateKey) =>
+            onSelectionChange={(dateKeys) =>
               setFilters((prev) => ({
                 ...prev,
-                selectedDateKeys: prev.selectedDateKeys.includes(dateKey)
-                  ? prev.selectedDateKeys.filter((item) => item !== dateKey)
-                  : [...prev.selectedDateKeys, dateKey],
+                selectedDateKeys: dateKeys,
               }))
             }
           />
@@ -6651,13 +6652,20 @@ function QuarterArrangementCalendar({
   arrangements,
   selectedDateKeys,
   onClearDateSelection,
-  onSelectDate,
+  onSelectionChange,
 }: {
   arrangements: ArrangementItem[];
   selectedDateKeys: string[];
   onClearDateSelection: () => void;
-  onSelectDate: (dateKey: string) => void;
+  onSelectionChange: (dateKeys: string[]) => void;
 }) {
+  const [isDraggingSelection, setIsDraggingSelection] = React.useState(false);
+  const selectionRef = React.useRef(selectedDateKeys);
+  const longPressTimerRef = React.useRef<number | null>(null);
+  const longPressTriggeredRef = React.useRef(false);
+  const dragModeRef = React.useRef<"add" | "remove">("add");
+  const dragStartKeyRef = React.useRef<string | null>(null);
+  const dragBaseKeysRef = React.useRef<string[]>([]);
   const today = new Date();
   const quarterStartMonth = Math.floor(today.getMonth() / 3) * 3;
   const startDate = new Date(today.getFullYear(), quarterStartMonth, 1);
@@ -6717,54 +6725,152 @@ function QuarterArrangementCalendar({
       label: column.find((cell) => cell.monthLabel)?.monthLabel ?? null,
     }))
     .filter((item): item is { index: number; label: string } => Boolean(item.label));
+  const gridTemplate = `repeat(${columns.length}, minmax(0, 1fr))`;
+  const quarterDateKeys = React.useMemo(
+    () => cells.filter((cell) => cell.inQuarter).map((cell) => cell.key),
+    [cells]
+  );
+
+  React.useEffect(() => {
+    selectionRef.current = selectedDateKeys;
+  }, [selectedDateKeys]);
+
+  const clearPressTimer = React.useCallback(() => {
+    if (longPressTimerRef.current !== null) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  }, []);
+
+  const finishSelectionGesture = React.useCallback(() => {
+    clearPressTimer();
+    dragStartKeyRef.current = null;
+    dragBaseKeysRef.current = [];
+    longPressTriggeredRef.current = false;
+    setIsDraggingSelection(false);
+  }, [clearPressTimer]);
+
+  React.useEffect(() => {
+    if (!isDraggingSelection) return undefined;
+    const handlePointerUp = () => finishSelectionGesture();
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerUp);
+    return () => {
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerUp);
+    };
+  }, [finishSelectionGesture, isDraggingSelection]);
+
+  const applySelection = React.useCallback(
+    (dateKey: string) => {
+      const startKey = dragStartKeyRef.current;
+      if (!startKey) return;
+      const startIndex = quarterDateKeys.indexOf(startKey);
+      const endIndex = quarterDateKeys.indexOf(dateKey);
+      if (startIndex === -1 || endIndex === -1) return;
+
+      const [from, to] = startIndex <= endIndex ? [startIndex, endIndex] : [endIndex, startIndex];
+      const rangeKeys = quarterDateKeys.slice(from, to + 1);
+      const baseKeys = dragBaseKeysRef.current;
+      const nextKeys =
+        dragModeRef.current === "add"
+          ? Array.from(new Set([...baseKeys, ...rangeKeys]))
+          : baseKeys.filter((item) => !rangeKeys.includes(item));
+      selectionRef.current = nextKeys;
+      onSelectionChange(nextKeys);
+    },
+    [onSelectionChange, quarterDateKeys]
+  );
+
+  const beginSelectionGesture = React.useCallback(
+    (dateKey: string, selected: boolean, inQuarter: boolean) => {
+      if (!inQuarter) return;
+      clearPressTimer();
+      longPressTriggeredRef.current = false;
+      longPressTimerRef.current = window.setTimeout(() => {
+        longPressTriggeredRef.current = true;
+        const currentSelection = selectionRef.current;
+        const shouldExpandSingleSelection =
+          selected && currentSelection.length === 1 && currentSelection[0] === dateKey;
+        const shouldRemove = selected && !shouldExpandSingleSelection;
+        dragModeRef.current = shouldRemove ? "remove" : "add";
+        dragStartKeyRef.current = dateKey;
+        dragBaseKeysRef.current = shouldRemove
+          ? currentSelection
+          : selected
+            ? currentSelection
+            : [];
+        setIsDraggingSelection(true);
+        applySelection(dateKey);
+      }, 220);
+    },
+    [applySelection, clearPressTimer]
+  );
+
+  const handleSingleSelect = React.useCallback(
+    (dateKey: string, inQuarter: boolean) => {
+      if (!inQuarter || longPressTriggeredRef.current) return;
+      clearPressTimer();
+      const nextKeys = [dateKey];
+      selectionRef.current = nextKeys;
+      onSelectionChange(nextKeys);
+    },
+    [clearPressTimer, onSelectionChange]
+  );
 
   const getCellClass = (key: string, inQuarter: boolean) => {
     const level = dayStats.get(key) ?? 0;
-    if (!inQuarter) return "border-transparent bg-transparent";
-    if (level >= 4) return "border-[#B91C1C] bg-[#EF4444]";
-    if (level === 3) return "border-[#B45309] bg-[#F59E0B]";
-    if (level === 2) return "border-[#1D4ED8] bg-[#3B82F6]";
-    if (level === 1) return "border-[#15803D] bg-[#22C55E]";
-    return "border-[#C9CFD8] bg-[#F7F8FA]";
+    if (!inQuarter) return "bg-transparent";
+    if (level >= 4) return "bg-[#DC2626]";
+    if (level === 3) return "bg-[#F59E0B]";
+    if (level === 2) return "bg-[#3B82F6]";
+    if (level === 1) return "bg-[#22C55E]";
+    return "bg-[#EEF1F5]";
   };
 
   return (
     <section className="mb-3 rounded-[14px] border border-[var(--record-card-border)] bg-[var(--record-card-bg)] px-3 py-3 shadow-[var(--mine-card-shadow)]">
-      <div className="flex items-center justify-end gap-3">
-        {selectedDateKeys.length > 0 && (
-          <button
-            type="button"
-            className="rounded-full bg-primary-soft px-2.5 py-1 text-xs leading-4 text-primary"
-            onClick={onClearDateSelection}
-          >
-            清除日期筛选
-          </button>
-        )}
-      </div>
-      <div className="mt-3">
+      <div className="flex items-start justify-between gap-3">
         <div
-          className="grid gap-x-1 text-[12px] leading-4 text-text-tertiary"
-          style={{ gridTemplateColumns: `repeat(${columns.length}, minmax(0, 1fr))` }}
+          className="grid w-full gap-x-1 text-[11px] leading-4 text-text-tertiary"
+          style={{ gridTemplateColumns: gridTemplate }}
         >
           {monthMarkers.map((item) => (
             <div
               key={`${item.label}-${item.index}`}
-              className="justify-self-start"
+              className="justify-self-start whitespace-nowrap"
               style={{ gridColumnStart: item.index + 1 }}
             >
               {item.label}
             </div>
           ))}
         </div>
+        <button
+          type="button"
+          className={cn(
+            "shrink-0 rounded-full bg-primary-soft px-2.5 py-1 text-[11px] leading-4 text-primary transition",
+            selectedDateKeys.length > 0 ? "opacity-100" : "pointer-events-none opacity-0"
+          )}
+          onClick={onClearDateSelection}
+        >
+          清除日期筛选
+        </button>
+      </div>
+      <div className="mt-2">
         <div
-          className="mt-2 grid gap-x-1 gap-y-1"
-          style={{ gridTemplateColumns: `repeat(${columns.length}, minmax(0, 1fr))` }}
+          className="grid w-full gap-x-1 gap-y-1"
+          style={{ gridTemplateColumns: gridTemplate }}
         >
           {Array.from({ length: 7 }, (_, rowIndex) =>
             columns.map((column, columnIndex) => {
               const cell = column[rowIndex];
               if (!cell) {
-                return <div key={`empty-${columnIndex}-${rowIndex}`} className="aspect-square w-full" />;
+                return (
+                  <div
+                    key={`empty-${columnIndex}-${rowIndex}`}
+                    className="aspect-square w-full"
+                  />
+                );
               }
               const selected = selectedDateKeys.includes(cell.key);
               return (
@@ -6772,15 +6878,29 @@ function QuarterArrangementCalendar({
                   key={cell.key}
                   type="button"
                   className={cn(
-                    "aspect-square w-full rounded-[3px] border transition hover:scale-[1.02]",
+                    "aspect-square w-full rounded-[3px] transition hover:scale-[1.04]",
                     selected && cell.inQuarter
-                      ? "ring-1 ring-primary ring-offset-1 ring-offset-[var(--record-card-bg)]"
+                      ? "ring-1 ring-inset ring-[#6B7280] dark:ring-[#D1D5DB]"
                       : "",
-                    cell.inQuarter && dayStats.get(cell.key) ? "shadow-[inset_0_0_0_1px_rgba(255,255,255,0.2)]" : "",
+                    cell.inQuarter && dayStats.get(cell.key)
+                      ? "shadow-[inset_0_0_0_1px_rgba(255,255,255,0.2)]"
+                      : "",
                     getCellClass(cell.key, cell.inQuarter)
                   )}
                   title={cell.key}
-                  onClick={() => cell.inQuarter && onSelectDate(cell.key)}
+                  onPointerDown={() =>
+                    beginSelectionGesture(cell.key, selected, cell.inQuarter)
+                  }
+                  onPointerEnter={() =>
+                    isDraggingSelection && cell.inQuarter && applySelection(cell.key)
+                  }
+                  onClick={() => handleSingleSelect(cell.key, cell.inQuarter)}
+                  onPointerUp={finishSelectionGesture}
+                  onPointerLeave={() => {
+                    if (!isDraggingSelection) {
+                      clearPressTimer();
+                    }
+                  }}
                 />
               );
             })
