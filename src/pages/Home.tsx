@@ -66,6 +66,7 @@ const aiConversationReadCountStorageKey = "arkme-demo.aiConversationReadCount";
 const browserNotificationPromptedStorageKey = "arkme-demo.browserNotificationPrompted";
 const createdSelfRecordsStorageKey = "arkme-demo.selfRecords";
 const arrangementsStorageKey = "arkme-demo.arrangements";
+const arrangementsStorageEvent = "arkme-demo:arrangements-updated";
 const arrangementAiConfigStorageKey = "arkme-demo.arrangementAiConfig";
 const chatArrangementSettingsStorageKey = "arkme-demo.chatArrangementSettings";
 const searchHistoryStorageKey = "arkme-demo.searchHistory";
@@ -130,6 +131,16 @@ type ArrangementAiConfig = {
 
 type ArrangementAiConfidence = "low" | "medium" | "high";
 type ArrangementAiAction = "create" | "update" | "complete" | "merge";
+type ArrangementExecutionLevel = "manual_only" | "ai_assist" | "ai_auto";
+
+type ArrangementCompletionSuggestion = {
+  reason: string;
+  sourceText: string;
+  confidence: ArrangementAiConfidence;
+  suggestedAt: number;
+  sourceConversation: RecordSourceConversation | null;
+  sourceRecord: RecordReference | null;
+};
 
 type ArrangementAiRecognitionResult = {
   action: ArrangementAiAction;
@@ -150,6 +161,9 @@ type ArrangementAiRecognitionResult = {
   confidence: ArrangementAiConfidence;
   notes: string;
   optimizationSummary: string;
+  completionExplanation: string;
+  executionLevel: ArrangementExecutionLevel;
+  executionReason: string;
   rawResponse: string;
 };
 
@@ -212,6 +226,10 @@ type ArrangementItem = {
   aiSummary: string;
   aiRelatedArrangementTitles: string[];
   aiProcessedAt: number | null;
+  aiExecutionLevel: ArrangementExecutionLevel;
+  aiExecutionReason: string;
+  pendingCompletionSuggestion: ArrangementCompletionSuggestion | null;
+  lastCompletionSuggestion: ArrangementCompletionSuggestion | null;
   createAt: number;
   updateAt: number;
 };
@@ -535,6 +553,17 @@ function normalizeStoredArrangement(value: unknown): ArrangementItem | null {
       Number.isFinite(arrangement.aiProcessedAt)
         ? arrangement.aiProcessedAt
         : null,
+    aiExecutionLevel: normalizeArrangementExecutionLevel(arrangement.aiExecutionLevel),
+    aiExecutionReason:
+      typeof arrangement.aiExecutionReason === "string"
+        ? arrangement.aiExecutionReason.trim()
+        : "",
+    pendingCompletionSuggestion: normalizeArrangementCompletionSuggestion(
+      arrangement.pendingCompletionSuggestion
+    ),
+    lastCompletionSuggestion: normalizeArrangementCompletionSuggestion(
+      arrangement.lastCompletionSuggestion
+    ),
     createAt: arrangement.createAt,
     updateAt: arrangement.updateAt,
   };
@@ -712,6 +741,33 @@ function normalizeArrangementAiConfidence(value: unknown): ArrangementAiConfiden
   return "medium";
 }
 
+function normalizeArrangementExecutionLevel(value: unknown): ArrangementExecutionLevel {
+  if (value === "ai_assist" || value === "ai_auto") return value;
+  return "manual_only";
+}
+
+function normalizeArrangementCompletionSuggestion(
+  value: unknown
+): ArrangementCompletionSuggestion | null {
+  if (!value || typeof value !== "object") return null;
+  const suggestion = value as Partial<ArrangementCompletionSuggestion>;
+  if (typeof suggestion.reason !== "string" || typeof suggestion.sourceText !== "string") {
+    return null;
+  }
+
+  return {
+    reason: suggestion.reason.trim(),
+    sourceText: suggestion.sourceText.trim(),
+    confidence: normalizeArrangementAiConfidence(suggestion.confidence),
+    suggestedAt:
+      typeof suggestion.suggestedAt === "number" && Number.isFinite(suggestion.suggestedAt)
+        ? suggestion.suggestedAt
+        : Date.now(),
+    sourceConversation: suggestion.sourceConversation ?? null,
+    sourceRecord: suggestion.sourceRecord ?? null,
+  };
+}
+
 function normalizeArrangementAiRecognitionResult(
   value: unknown,
   rawResponse: string,
@@ -770,6 +826,13 @@ function normalizeArrangementAiRecognitionResult(
       typeof result.optimizationSummary === "string"
         ? result.optimizationSummary.trim()
         : "",
+    completionExplanation:
+      typeof result.completionExplanation === "string"
+        ? result.completionExplanation.trim()
+        : "",
+    executionLevel: normalizeArrangementExecutionLevel(result.executionLevel),
+    executionReason:
+      typeof result.executionReason === "string" ? result.executionReason.trim() : "",
     rawResponse,
   };
 }
@@ -990,6 +1053,7 @@ async function recognizeArrangementFromText(
               "Choose action=create when this is a new arrangement.",
               "Choose action=update when the text is a follow-up, refinement, or better wording for one existing arrangement.",
               "Choose action=complete when the text strongly indicates one existing arrangement is already finished.",
+              "Do not rely on literal keywords alone for completion. Evaluate whether the full message and context semantically prove the arrangement is done.",
               "Choose action=merge when the text should cause one or more existing arrangements to be consolidated or replanned together.",
               "Treat same location plus nearby time as a strong merge/replan signal, even if wording differs.",
               "When conversation context exists, use it to infer the real assignee, scope, and whether this should become the current user's arrangement.",
@@ -1002,7 +1066,7 @@ async function recognizeArrangementFromText(
               "When action is merge, fill targetUids with all related arrangement uids that should be grouped or consolidated.",
               "Do not only append text. Optimize the resulting arrangement so the user gets a cleaner, more useful plan.",
               "Use this schema:",
-              '{"action":"create|update|complete|merge","targetUid":"string","targetUids":["string"],"shouldCreateDraft":true,"relevanceReason":"string","title":"string","content":"string","kind":"task|schedule|reminder|note","priority":"low|normal|important|urgent","scheduledAt":"string","scheduledAtText":"string","location":"string","participants":["string"],"tags":["string"],"completionCriteria":"string","confidence":"low|medium|high","notes":"string","optimizationSummary":"string"}',
+              '{"action":"create|update|complete|merge","targetUid":"string","targetUids":["string"],"shouldCreateDraft":true,"relevanceReason":"string","title":"string","content":"string","kind":"task|schedule|reminder|note","priority":"low|normal|important|urgent","scheduledAt":"string","scheduledAtText":"string","location":"string","participants":["string"],"tags":["string"],"completionCriteria":"string","confidence":"low|medium|high","notes":"string","optimizationSummary":"string","completionExplanation":"string","executionLevel":"manual_only|ai_assist|ai_auto","executionReason":"string"}',
               "If the text is ambiguous, keep confidence low and explain uncertainty in notes.",
             ].join(" "),
         },
@@ -1198,6 +1262,7 @@ function persistArrangements(arrangements: ArrangementItem[]) {
 
   try {
     window.localStorage.setItem(arrangementsStorageKey, JSON.stringify(arrangements));
+    window.dispatchEvent(new CustomEvent(arrangementsStorageEvent));
   } catch {
     // Keep the visible in-memory arrangements if storage is unavailable.
   }
@@ -1325,6 +1390,44 @@ function getArrangementStatusPillClass(status: ArrangementStatus) {
     return "bg-amber-100 text-amber-700 dark:bg-amber-950/70 dark:text-amber-300";
   }
   return "bg-primary-soft text-primary";
+}
+
+function isGroupArrangementSelfRelevant(
+  arrangement: ArrangementItem,
+  summary: TestConversationSummary,
+  selfDisplayName: string
+) {
+  if (summary.conversationType !== "group") return true;
+
+  const selfKeywords = [selfDisplayName.trim(), "我", "自己"].filter(Boolean);
+  const relatedTexts = [
+    arrangement.title,
+    arrangement.content,
+    arrangement.location,
+    arrangement.completionCriteria,
+    ...arrangement.participants,
+    ...arrangement.tags,
+    ...arrangement.aiRelatedArrangementTitles,
+    ...arrangement.sources.map((source) => source.text),
+  ];
+
+  const fromSelfSource = arrangement.sources.some((source) => {
+    const recordUid = source.sourceRecord?.uid;
+    if (!recordUid) return false;
+    return summary.records.some((record) => record.uid === recordUid && record.sender === "demo");
+  });
+
+  const mentionsSelf = relatedTexts.some((text) =>
+    selfKeywords.some((keyword) => keyword && text.includes(keyword))
+  );
+
+  return fromSelfSource || mentionsSelf;
+}
+
+function getArrangementExecutionLevelLabel(level: ArrangementExecutionLevel) {
+  if (level === "ai_auto") return "AI可代执行";
+  if (level === "ai_assist") return "AI辅助执行";
+  return "仅人工完成";
 }
 
 function makeRecordReference(record: RecordItem): RecordReference {
@@ -2218,24 +2321,24 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
   ]);
 
   React.useEffect(() => {
-    const identityRecords = testConversationRecords.filter(
-      (record) => record.sender === "identity"
+    const monitoredRecords = testConversationRecords.filter(
+      (record) => record.text_content.trim().length > 0
     );
 
     if (!initializedAutoCompleteMonitorRef.current) {
-      identityRecords.forEach((record) => {
+      monitoredRecords.forEach((record) => {
         autoCompletedMessageIdsRef.current.add(record.uid);
       });
       initializedAutoCompleteMonitorRef.current = true;
       return;
     }
 
-    const newIdentityRecords = identityRecords.filter(
+    const newMonitoredRecords = monitoredRecords.filter(
       (record) => !autoCompletedMessageIdsRef.current.has(record.uid)
     );
-    if (newIdentityRecords.length === 0) return;
+    if (newMonitoredRecords.length === 0) return;
 
-    newIdentityRecords.forEach((record) => {
+    newMonitoredRecords.forEach((record) => {
       autoCompletedMessageIdsRef.current.add(record.uid);
     });
 
@@ -2243,7 +2346,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     if (!isArrangementAiConfigReady(arrangementAiConfig)) return;
 
     void (async () => {
-      for (const record of newIdentityRecords) {
+      for (const record of newMonitoredRecords) {
         const { inputText, context } = buildArrangementRecognitionInput([record]);
         if (!inputText) continue;
 
@@ -2256,28 +2359,45 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           );
           if (result.action !== "complete" || !result.targetUid) continue;
 
+          const sourceConversation = record.sourceConversation ?? null;
+          const sourceRecord = makeRecordReference(record);
           const nextArrangements = getInitialArrangements().map((arrangement) =>
             arrangement.uid !== result.targetUid
               ? arrangement
               : {
                   ...arrangement,
-                  status: "completed" as ArrangementStatus,
-                  completedAt: Date.now(),
-                  pausedAt: null,
                   aiAction: "complete" as ArrangementAiAction,
-                  aiSummary: result.optimizationSummary || result.notes || arrangement.aiSummary,
+                  aiSummary:
+                    result.completionExplanation ||
+                    result.optimizationSummary ||
+                    result.notes ||
+                    arrangement.aiSummary,
                   aiProcessedAt: Date.now(),
+                  aiExecutionLevel: result.executionLevel,
+                  aiExecutionReason: result.executionReason || arrangement.aiExecutionReason,
+                  pendingCompletionSuggestion: {
+                    reason:
+                      result.completionExplanation ||
+                      result.optimizationSummary ||
+                      result.notes ||
+                      "AI 判断该安排可能已经完成。",
+                    sourceText: inputText,
+                    confidence: result.confidence,
+                    suggestedAt: Date.now(),
+                    sourceConversation,
+                    sourceRecord,
+                  },
                   updateAt: Date.now(),
                 }
           );
 
-          if (nextArrangements.some((arrangement) => arrangement.uid === result.targetUid && arrangement.status === "completed")) {
+          if (nextArrangements.some((arrangement) => arrangement.uid === result.targetUid && arrangement.pendingCompletionSuggestion)) {
             persistArrangements(nextArrangements);
-            const completedArrangement = nextArrangements.find(
+            const targetArrangement = nextArrangements.find(
               (arrangement) => arrangement.uid === result.targetUid
             );
-            if (completedArrangement) {
-              setMessageArrangementNotice(`已根据新消息更新“${completedArrangement.title}”为完成`);
+            if (targetArrangement) {
+              setMessageArrangementNotice(`AI 已为“${targetArrangement.title}”生成完成建议`);
             }
           }
         } catch {
@@ -2503,22 +2623,33 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     }
 
     if (showChatArrangementScreen && activeTestConversationSummary) {
+      const relatedArrangements = getInitialArrangements().filter((arrangement) =>
+        arrangement.sources.some(
+          (source) =>
+            source.sourceConversation?.conversationId ===
+            activeTestConversationSummary.conversationId
+        )
+      );
       return (
         <ChatArrangementScreen
           summary={activeTestConversationSummary}
           settings={chatArrangementSettings}
-          relatedArrangements={getInitialArrangements().filter((arrangement) =>
-            arrangement.sources.some(
-              (source) =>
-                source.sourceConversation?.conversationId ===
-                activeTestConversationSummary.conversationId
-            )
-          )}
+          selfDisplayName={selfDisplayName}
+          relatedArrangements={relatedArrangements}
           onBack={() => setShowChatArrangementScreen(false)}
           onChangeSettings={setChatArrangementSettings}
           onOpenArrangement={(uid) => {
             setFocusedArrangementId(uid);
+            setShowAnswerGuide(false);
+            setShowAiConversation(false);
+            setShowSendToSelf(false);
             setShowChatArrangementScreen(false);
+            setShowTestConversation(false);
+            setActiveTestIdentityId(null);
+            setTestConversationTargetUid(null);
+            setRecordDetail(null);
+            setRecordSnapshot(null);
+            setConversationReturnContext({ mode: "drawer" });
             onNavigate("arrangements");
           }}
         />
@@ -4341,6 +4472,9 @@ function ArrangementsPreview({
   const [pendingSuggestedStatus, setPendingSuggestedStatus] = React.useState<ArrangementStatus | null>(null);
   const [pendingOptimizationSummary, setPendingOptimizationSummary] = React.useState("");
   const [pendingAiAction, setPendingAiAction] = React.useState<ArrangementAiAction | null>(null);
+  const [pendingExecutionLevel, setPendingExecutionLevel] =
+    React.useState<ArrangementExecutionLevel>("manual_only");
+  const [pendingExecutionReason, setPendingExecutionReason] = React.useState("");
   const [showFilters, setShowFilters] = React.useState(false);
   const [filters, setFilters] = React.useState<ArrangementFilterState>({
     status: "all",
@@ -4441,6 +4575,9 @@ function ArrangementsPreview({
   const expiredCount = filteredArrangements.filter((item) => item.status === "expired").length;
   const pausedCount = filteredArrangements.filter((item) => item.status === "paused").length;
   const completedCount = filteredArrangements.filter((item) => item.status === "completed").length;
+  const pendingCompletionArrangements = arrangements.filter(
+    (item) => item.pendingCompletionSuggestion
+  );
 
   React.useEffect(() => {
     const timer = window.setInterval(() => {
@@ -4448,6 +4585,24 @@ function ArrangementsPreview({
     }, 60000);
 
     return () => window.clearInterval(timer);
+  }, []);
+
+  React.useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const refreshArrangements = () => {
+      setArrangements(getInitialArrangements());
+    };
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key !== arrangementsStorageKey) return;
+      refreshArrangements();
+    };
+
+    window.addEventListener("storage", handleStorage);
+    window.addEventListener(arrangementsStorageEvent, refreshArrangements);
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+      window.removeEventListener(arrangementsStorageEvent, refreshArrangements);
+    };
   }, []);
 
   React.useEffect(() => {
@@ -4483,6 +4638,8 @@ function ArrangementsPreview({
     setPendingSuggestedStatus(null);
     setPendingOptimizationSummary("");
     setPendingAiAction(null);
+    setPendingExecutionLevel("manual_only");
+    setPendingExecutionReason("");
     setEditingArrangementId(null);
   };
 
@@ -4630,6 +4787,8 @@ function ArrangementsPreview({
     setPendingSuggestedStatus(result.action === "complete" ? "completed" : null);
     setPendingOptimizationSummary(result.optimizationSummary || result.notes);
     setPendingAiAction(result.action);
+    setPendingExecutionLevel(result.executionLevel);
+    setPendingExecutionReason(result.executionReason);
     setEditingArrangementId(primaryTarget.uid);
     setShowAiRecognizer(false);
     setShowForm(true);
@@ -4667,6 +4826,8 @@ function ArrangementsPreview({
     setPendingSuggestedStatus(null);
     setPendingOptimizationSummary("");
     setPendingAiAction(null);
+    setPendingExecutionLevel(arrangement.aiExecutionLevel);
+    setPendingExecutionReason(arrangement.aiExecutionReason);
     setEditingArrangementId(arrangement.uid);
     setShowForm(true);
     setShowAiRecognizer(false);
@@ -4706,6 +4867,8 @@ function ArrangementsPreview({
     setSourceRecord(currentSourceRecord);
     setPendingOptimizationSummary(result.optimizationSummary || result.notes);
     setPendingAiAction(result.action);
+    setPendingExecutionLevel(result.executionLevel);
+    setPendingExecutionReason(result.executionReason);
     setShowAiRecognizer(false);
     setShowForm(true);
     setActiveArrangementId(null);
@@ -4860,6 +5023,14 @@ function ArrangementsPreview({
                   isAiDerivedSource
                     ? now
                     : primaryTarget.aiProcessedAt,
+                aiExecutionLevel: isAiDerivedSource
+                  ? pendingExecutionLevel
+                  : primaryTarget.aiExecutionLevel,
+                aiExecutionReason: isAiDerivedSource
+                  ? pendingExecutionReason
+                  : primaryTarget.aiExecutionReason,
+                pendingCompletionSuggestion: primaryTarget.pendingCompletionSuggestion,
+                lastCompletionSuggestion: primaryTarget.lastCompletionSuggestion,
                 updateAt: now,
               }
             : arrangement
@@ -4897,6 +5068,10 @@ function ArrangementsPreview({
         aiSummary: isAiDerivedSource ? nextAiSummary : "",
         aiRelatedArrangementTitles: [],
         aiProcessedAt: isAiDerivedSource ? now : null,
+        aiExecutionLevel: isAiDerivedSource ? pendingExecutionLevel : "manual_only",
+        aiExecutionReason: isAiDerivedSource ? pendingExecutionReason : "",
+        pendingCompletionSuggestion: null,
+        lastCompletionSuggestion: null,
         createAt: now,
         updateAt: now,
       };
@@ -4915,8 +5090,51 @@ function ArrangementsPreview({
       status: status === "todo" ? getOpenArrangementStatus(arrangement.scheduledAt, now) : status,
       completedAt: status === "completed" ? now : null,
       pausedAt: status === "paused" ? now : null,
+      pendingCompletionSuggestion: status === "completed" ? null : arrangement.pendingCompletionSuggestion,
       updateAt: now,
     }));
+  };
+
+  const acceptCompletionSuggestion = (uid: string) => {
+    const now = Date.now();
+    updateArrangement(uid, (arrangement) => {
+      const suggestion = arrangement.pendingCompletionSuggestion;
+      if (!suggestion) return arrangement;
+      return {
+        ...arrangement,
+        status: "completed",
+        completedAt: now,
+        pausedAt: null,
+        aiAction: "complete",
+        aiSummary: suggestion.reason || arrangement.aiSummary,
+        aiProcessedAt: now,
+        pendingCompletionSuggestion: null,
+        lastCompletionSuggestion: suggestion,
+        updateAt: now,
+      };
+    });
+    setSaveHint("已确认 AI 的完成建议。");
+  };
+
+  const dismissCompletionSuggestion = (uid: string) => {
+    updateArrangement(uid, (arrangement) => ({
+      ...arrangement,
+      pendingCompletionSuggestion: null,
+      updateAt: Date.now(),
+    }));
+    setSaveHint("已忽略这条 AI 完成建议。");
+  };
+
+  const rollbackAiCompletion = (uid: string) => {
+    const now = Date.now();
+    updateArrangement(uid, (arrangement) => ({
+      ...arrangement,
+      status: getOpenArrangementStatus(arrangement.scheduledAt, now),
+      completedAt: null,
+      lastCompletionSuggestion: null,
+      updateAt: now,
+    }));
+    setSaveHint("已撤回 AI 完成结果。");
   };
 
   const deleteArrangement = (uid: string) => {
@@ -5005,6 +5223,9 @@ function ArrangementsPreview({
         onComplete={() => changeStatus(activeArrangement.uid, "completed")}
         onPause={() => changeStatus(activeArrangement.uid, "paused")}
         onRestore={() => changeStatus(activeArrangement.uid, "todo")}
+        onAcceptCompletionSuggestion={() => acceptCompletionSuggestion(activeArrangement.uid)}
+        onDismissCompletionSuggestion={() => dismissCompletionSuggestion(activeArrangement.uid)}
+        onRollbackAiCompletion={() => rollbackAiCompletion(activeArrangement.uid)}
         onDelete={() => deleteArrangement(activeArrangement.uid)}
         onOpenSourceRecord={onOpenSourceRecord}
         onOpenSourceConversation={onOpenSourceConversation}
@@ -5286,6 +5507,26 @@ function ArrangementsPreview({
           <p className="mb-3 rounded-[10px] bg-primary-soft px-3 py-2 text-xs leading-4 text-primary">
             {saveHint}
           </p>
+        )}
+
+        {!showForm && pendingCompletionArrangements.length > 0 && (
+          <section className="mb-3 rounded-[12px] border border-amber-200 bg-amber-50 px-3 py-3 shadow-[var(--mine-card-shadow)] dark:border-amber-900/50 dark:bg-amber-950/20">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold leading-5 text-text">AI 完成建议</p>
+                <p className="mt-1 text-sm leading-5 text-text-muted">
+                  当前有 {pendingCompletionArrangements.length} 条安排等待你确认是否完成。
+                </p>
+              </div>
+              <button
+                type="button"
+                className="shrink-0 rounded-full bg-white/80 px-3 py-1.5 text-sm font-medium leading-4 text-amber-700 transition active:scale-[0.98] dark:bg-amber-950/40 dark:text-amber-200"
+                onClick={() => setActiveArrangementId(pendingCompletionArrangements[0]!.uid)}
+              >
+                查看
+              </button>
+            </div>
+          </section>
         )}
 
         {!showForm && filteredArrangements.length > 0 ? (
@@ -6204,6 +6445,9 @@ function ArrangementDetailView({
   onComplete,
   onPause,
   onRestore,
+  onAcceptCompletionSuggestion,
+  onDismissCompletionSuggestion,
+  onRollbackAiCompletion,
   onDelete,
   onOpenSourceRecord,
   onOpenSourceConversation,
@@ -6241,6 +6485,9 @@ function ArrangementDetailView({
   onComplete: () => void;
   onPause: () => void;
   onRestore: () => void;
+  onAcceptCompletionSuggestion: () => void;
+  onDismissCompletionSuggestion: () => void;
+  onRollbackAiCompletion: () => void;
   onDelete: () => void;
   onOpenSourceRecord: (record: RecordItem) => void;
   onOpenSourceConversation: (source: RecordSourceConversation) => void;
@@ -6250,6 +6497,8 @@ function ArrangementDetailView({
     (arrangement.source.type === "conversation" && arrangement.source.sourceRecord
       ? arrangement.source
       : null);
+  const completionSuggestion = arrangement.pendingCompletionSuggestion;
+  const lastCompletionSuggestion = arrangement.lastCompletionSuggestion;
 
   return (
     <div className="flex h-full flex-col bg-bg">
@@ -6376,6 +6625,66 @@ function ArrangementDetailView({
                   </span>
                 ))}
               </div>
+              <section className="mt-4 rounded-[12px] bg-surface px-3 py-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs leading-4 text-text-tertiary">执行方式</span>
+                  <span className="rounded-full bg-primary-soft px-2.5 py-1 text-xs font-medium leading-4 text-primary">
+                    {getArrangementExecutionLevelLabel(arrangement.aiExecutionLevel)}
+                  </span>
+                </div>
+                {arrangement.aiExecutionReason && (
+                  <p className="mt-2 text-sm leading-6 text-text-muted">
+                    {arrangement.aiExecutionReason}
+                  </p>
+                )}
+              </section>
+              {completionSuggestion && (
+                <section className="mt-4 rounded-[12px] border border-amber-200 bg-amber-50 px-3 py-3 dark:border-amber-900/40 dark:bg-amber-950/20">
+                  <p className="text-sm font-semibold leading-5 text-text">AI 完成建议</p>
+                  <p className="mt-2 text-sm leading-6 text-text">
+                    {completionSuggestion.reason || "AI 判断这条安排可能已经完成。"}
+                  </p>
+                  {completionSuggestion.sourceText && (
+                    <p className="mt-2 text-sm leading-6 text-text-muted">
+                      依据消息：{completionSuggestion.sourceText}
+                    </p>
+                  )}
+                  <p className="mt-2 text-xs leading-5 text-text-tertiary">
+                    置信度：{completionSuggestion.confidence === "high" ? "高" : completionSuggestion.confidence === "medium" ? "中" : "低"} · {formatArrangementDateTime(completionSuggestion.suggestedAt)}
+                  </p>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      className="h-10 rounded-[10px] bg-primary text-sm font-semibold text-on-primary transition active:scale-[0.97]"
+                      onClick={onAcceptCompletionSuggestion}
+                    >
+                      确认完成
+                    </button>
+                    <button
+                      type="button"
+                      className="h-10 rounded-[10px] bg-surface text-sm font-medium text-text transition active:scale-[0.97]"
+                      onClick={onDismissCompletionSuggestion}
+                    >
+                      暂不采纳
+                    </button>
+                  </div>
+                </section>
+              )}
+              {!completionSuggestion && arrangement.status === "completed" && lastCompletionSuggestion && (
+                <section className="mt-4 rounded-[12px] border border-border-light bg-surface px-3 py-3">
+                  <p className="text-sm font-semibold leading-5 text-text">AI 完成记录</p>
+                  <p className="mt-2 text-sm leading-6 text-text">
+                    {lastCompletionSuggestion.reason || "这条安排曾由 AI 完成建议确认。"}
+                  </p>
+                  <button
+                    type="button"
+                    className="mt-3 h-10 rounded-[10px] bg-surface-subtle px-3 text-sm font-medium text-text transition active:scale-[0.97]"
+                    onClick={onRollbackAiCompletion}
+                  >
+                    撤回 AI 完成
+                  </button>
+                </section>
+              )}
               {arrangement.checklist.length > 0 && (
                 <section className="mt-4 rounded-[12px] bg-surface px-3 py-3">
                   <h3 className="text-xs font-medium leading-4 text-text-tertiary">清单</h3>
@@ -7554,6 +7863,7 @@ function LanguageSheet({ onClose }: { onClose: () => void }) {
 
 function ChatArrangementScreen({
   summary,
+  selfDisplayName,
   settings,
   relatedArrangements,
   onBack,
@@ -7561,12 +7871,20 @@ function ChatArrangementScreen({
   onOpenArrangement,
 }: {
   summary: TestConversationSummary;
+  selfDisplayName: string;
   settings: ChatArrangementSettings;
   relatedArrangements: ArrangementItem[];
   onBack: () => void;
   onChangeSettings: React.Dispatch<React.SetStateAction<ChatArrangementSettings>>;
   onOpenArrangement: (uid: string) => void;
 }) {
+  const displayedArrangements =
+    summary.conversationType === "group" && settings.groupDisplayScope === "selfOnly"
+      ? relatedArrangements.filter((arrangement) =>
+          isGroupArrangementSelfRelevant(arrangement, summary, selfDisplayName)
+        )
+      : relatedArrangements;
+
   return (
     <div className="flex h-full flex-col bg-bg">
       <ArrangementPageHeader title="聊天功能" onBack={onBack} />
@@ -7576,46 +7894,6 @@ function ChatArrangementScreen({
           <p className="mt-1 text-xs leading-5 text-text-muted">
             {summary.title} · {summary.conversationType === "group" ? "群聊" : "私聊"}
           </p>
-        </section>
-
-        <section className="mt-3 rounded-[14px] border border-[var(--record-card-border)] bg-[var(--record-card-bg)] px-3 py-3 shadow-[var(--mine-card-shadow)]">
-          <p className="text-sm font-semibold leading-5 text-text">相关安排</p>
-          <p className="mt-1 text-xs leading-5 text-text-muted">
-            查看当前聊天来源下已经生成过的安排。
-          </p>
-          <div className="mt-3 space-y-2">
-            {relatedArrangements.length > 0 ? (
-              relatedArrangements.map((arrangement) => (
-                <button
-                  key={arrangement.uid}
-                  type="button"
-                  className="w-full rounded-[12px] bg-surface px-3 py-3 text-left transition active:scale-[0.99]"
-                  onClick={() => onOpenArrangement(arrangement.uid)}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="min-w-0 truncate text-sm font-semibold leading-5 text-text">
-                      {arrangement.title}
-                    </p>
-                    <span
-                      className={cn(
-                        "rounded-full px-2 py-0.5 text-[11px] leading-4",
-                        getArrangementStatusPillClass(arrangement.status)
-                      )}
-                    >
-                      {getArrangementStatusLabel(arrangement.status)}
-                    </span>
-                  </div>
-                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-text-muted">
-                    {arrangement.content}
-                  </p>
-                </button>
-              ))
-            ) : (
-              <div className="rounded-[12px] bg-surface px-3 py-3 text-xs leading-5 text-text-muted">
-                当前聊天还没有关联安排。
-              </div>
-            )}
-          </div>
         </section>
 
         <section className="mt-3 rounded-[14px] border border-[var(--record-card-border)] bg-[var(--record-card-bg)] px-3 py-3 shadow-[var(--mine-card-shadow)]">
@@ -7654,21 +7932,21 @@ function ChatArrangementScreen({
 
         {summary.conversationType === "group" && (
           <section className="mt-3 rounded-[14px] border border-[var(--record-card-border)] bg-[var(--record-card-bg)] px-3 py-3 shadow-[var(--mine-card-shadow)]">
-            <p className="text-sm font-semibold leading-5 text-text">群聊展示范围策略</p>
+            <p className="text-sm font-semibold leading-5 text-text">群聊相关安排筛选</p>
             <p className="mt-1 text-xs leading-5 text-text-muted">
-              决定群聊消息识别时，是只保留和你相关的安排，还是允许保留群共享安排。
+              先选择查看范围，再看当前群聊下的相关安排。
             </p>
             <div className="mt-3 space-y-2">
               {[
                 {
                   key: "selfOnly" as const,
                   title: "只看自己相关",
-                  desc: "优先识别指向你、由你发出，或明确需要你执行的安排。",
+                  desc: "只显示和你本人执行、回复或内容明确关联的安排。",
                 },
                 {
                   key: "all" as const,
-                  title: "看全群安排",
-                  desc: "群里的共享事项也允许进入安排，由你后续筛选确认。",
+                  title: "查看全部相关安排",
+                  desc: "把当前群聊来源下生成过的安排全部展示出来。",
                 },
               ].map((option) => {
                 const active = settings.groupDisplayScope === option.key;
@@ -7709,6 +7987,52 @@ function ChatArrangementScreen({
             </div>
           </section>
         )}
+
+        <section className="mt-3 rounded-[14px] border border-[var(--record-card-border)] bg-[var(--record-card-bg)] px-3 py-3 shadow-[var(--mine-card-shadow)]">
+          <p className="text-sm font-semibold leading-5 text-text">相关安排</p>
+          <p className="mt-1 text-xs leading-5 text-text-muted">
+            {summary.conversationType === "group"
+              ? settings.groupDisplayScope === "selfOnly"
+                ? "当前仅展示和你本人相关的群聊安排。"
+                : "当前展示这个群聊下的全部相关安排。"
+              : "查看当前聊天来源下已经生成过的安排。"}
+          </p>
+          <div className="mt-3 space-y-2">
+            {displayedArrangements.length > 0 ? (
+              displayedArrangements.map((arrangement) => (
+                <button
+                  key={arrangement.uid}
+                  type="button"
+                  className="w-full rounded-[12px] bg-surface px-3 py-3 text-left transition active:scale-[0.99]"
+                  onClick={() => onOpenArrangement(arrangement.uid)}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="min-w-0 truncate text-sm font-semibold leading-5 text-text">
+                      {arrangement.title}
+                    </p>
+                    <span
+                      className={cn(
+                        "rounded-full px-2 py-0.5 text-[11px] leading-4",
+                        getArrangementStatusPillClass(arrangement.status)
+                      )}
+                    >
+                      {getArrangementStatusLabel(arrangement.status)}
+                    </span>
+                  </div>
+                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-text-muted">
+                    {arrangement.content}
+                  </p>
+                </button>
+              ))
+            ) : (
+              <div className="rounded-[12px] bg-surface px-3 py-3 text-xs leading-5 text-text-muted">
+                {summary.conversationType === "group" && settings.groupDisplayScope === "selfOnly"
+                  ? "当前筛选下还没有和你本人相关的群聊安排。"
+                  : "当前聊天还没有关联安排。"}
+              </div>
+            )}
+          </div>
+        </section>
       </div>
     </div>
   );
